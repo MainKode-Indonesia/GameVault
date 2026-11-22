@@ -1,6 +1,8 @@
 {
-  "name": "Kinetix Play",
+  "name": "GameVault",
   "description": "Digital game storefront and multi-mirror distribution platform with real-time search, community reviews, personal wishlists, and activity monitoring.",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }
