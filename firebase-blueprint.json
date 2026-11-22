@@ -1,0 +1,490 @@
+{
+  "entities": {
+    "Game": {
+      "title": "Game",
+      "description": "A digital game title in the GameVault catalog with banner cover, vertical cover, screenshots, dynamic review rating aggregates, and multiple download mirrors.",
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 120,
+          "description": "Display title of the game."
+        },
+        "description": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 4000,
+          "description": "Full synopsis and gameplay overview."
+        },
+        "size": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 40,
+          "description": "Download and storage footprint (e.g., 68.4 GB)."
+        },
+        "genre": {
+          "type": "string",
+          "enum": [
+            "Action RPG",
+            "Tactical Shooter",
+            "Motorsport Sim",
+            "Strategy",
+            "Sci-Fi Adventure",
+            "Survival",
+            "Indie"
+          ],
+          "description": "Primary game genre."
+        },
+        "tags": {
+          "type": "array",
+          "description": "List of 1 to 10 gameplay/feature tags (e.g. Open World, Co-op, Indie)."
+        },
+        "rating": {
+          "type": "number",
+          "description": "Dynamically calculated average rating from 0 to 5."
+        },
+        "ratingSum": {
+          "type": "number",
+          "description": "Sum of all user 5-star review scores for dynamic average computation."
+        },
+        "reviewCount": {
+          "type": "number",
+          "description": "Total number of user reviews submitted for this game."
+        },
+        "developer": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 100,
+          "description": "Studio or publisher name."
+        },
+        "releaseYear": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 10,
+          "pattern": "^[0-9]{4}$",
+          "description": "Four-digit release year."
+        },
+        "bannerCoverUrl": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 1000,
+          "description": "Wide 16:9 banner cover artwork URL or bundled asset path."
+        },
+        "verticalCoverUrl": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 1000,
+          "description": "Vertical 3:4 box-art poster cover URL or bundled asset path."
+        },
+        "screenshots": {
+          "type": "array",
+          "description": "Minimum 3 gameplay screenshot URLs or asset paths (max 10)."
+        },
+        "downloadLinks": {
+          "type": "array",
+          "description": "Array of mirror download sources (label, provider, url, partInfo)."
+        },
+        "featured": {
+          "type": "boolean",
+          "description": "Whether the game is highlighted in the storefront hero."
+        },
+        "visibility": {
+          "type": "string",
+          "enum": ["public", "draft"],
+          "description": "Catalog visibility state."
+        },
+        "downloadsCount": {
+          "type": "number",
+          "description": "Total mirror download interactions."
+        },
+        "createdBy": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "UID of the registered admin creator."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of creation."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of last modification."
+        },
+        "adminUpdatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of the last catalog edit by an administrator."
+        }
+      },
+      "required": [
+        "title",
+        "description",
+        "size",
+        "genre",
+        "tags",
+        "rating",
+        "ratingSum",
+        "reviewCount",
+        "developer",
+        "releaseYear",
+        "bannerCoverUrl",
+        "verticalCoverUrl",
+        "screenshots",
+        "downloadLinks",
+        "featured",
+        "visibility",
+        "downloadsCount",
+        "createdBy",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Review": {
+      "title": "Review",
+      "description": "User-submitted 5-star rating and review document in the top-level reviews collection.",
+      "type": "object",
+      "properties": {
+        "gameId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "userPhoto": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "rating": {
+          "type": "number",
+          "description": "Integer star rating from 1 to 5."
+        },
+        "content": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 1000
+        },
+        "visibility": {
+          "type": "string",
+          "enum": ["public"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "gameId",
+        "userId",
+        "userName",
+        "userPhoto",
+        "rating",
+        "content",
+        "visibility",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Comment": {
+      "title": "Comment",
+      "description": "User discussion comment linked to a game in the top-level comments collection.",
+      "type": "object",
+      "properties": {
+        "gameId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "userPhoto": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "visibility": {
+          "type": "string",
+          "enum": ["public"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "gameId",
+        "userId",
+        "userName",
+        "userPhoto",
+        "text",
+        "visibility",
+        "createdAt"
+      ]
+    },
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Private user account metadata isolated to owner and admin.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "maxLength": 160
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "photoURL": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "role": {
+          "type": "string",
+          "enum": ["user", "admin"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "lastLoginAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "uid",
+        "email",
+        "displayName",
+        "photoURL",
+        "role",
+        "createdAt",
+        "lastLoginAt"
+      ]
+    },
+    "UserPublicBadge": {
+      "title": "UserPublicBadge",
+      "description": "Non-PII public role and membership tenure metadata under users/{userId}/public/profile.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "role": {
+          "type": "string",
+          "enum": ["user", "admin"]
+        },
+        "memberSince": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "uid",
+        "displayName",
+        "role",
+        "memberSince",
+        "updatedAt"
+      ]
+    },
+    "WishlistItem": {
+      "title": "WishlistItem",
+      "description": "A saved game inside a user's private wishlist storing the vertical cover.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "gameId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "gameTitle": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "gameVerticalCover": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "gameGenre": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 50
+        },
+        "gameSize": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40
+        },
+        "addedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "userId",
+        "gameId",
+        "gameTitle",
+        "gameVerticalCover",
+        "gameGenre",
+        "gameSize",
+        "addedAt"
+      ]
+    },
+    "ActivityLog": {
+      "title": "ActivityLog",
+      "description": "User activity record for wishlist, downloads, reviews, and catalog management.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "actionType": {
+          "type": "string",
+          "enum": ["wishlist_add", "wishlist_remove", "download", "comment", "game_publish"]
+        },
+        "gameId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "gameTitle": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "detail": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "userId",
+        "userName",
+        "actionType",
+        "gameId",
+        "gameTitle",
+        "detail",
+        "createdAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/games/{gameId}": {
+      "schema": {
+        "$ref": "#/entities/Game"
+      },
+      "description": "Publicly browsable GameVault catalog with dynamic rating aggregates."
+    },
+    "/reviews/{reviewId}": {
+      "schema": {
+        "$ref": "#/entities/Review"
+      },
+      "description": "Top-level user 5-star reviews collection keyed deterministically as {gameId}_{userId}."
+    },
+    "/comments/{commentId}": {
+      "schema": {
+        "$ref": "#/entities/Comment"
+      },
+      "description": "Top-level user discussion comments collection linked to games by gameId."
+    },
+    "/users/{userId}": {
+      "schema": {
+        "$ref": "#/entities/UserProfile"
+      },
+      "description": "Private user account profiles containing PII."
+    },
+    "/users/{userId}/public/{docId}": {
+      "schema": {
+        "$ref": "#/entities/UserPublicBadge"
+      },
+      "description": "Non-PII public user role and tenure badge metadata."
+    },
+    "/users/{userId}/wishlist/{gameId}": {
+      "schema": {
+        "$ref": "#/entities/WishlistItem"
+      },
+      "description": "User-scoped wishlist collection storing vertical poster covers."
+    },
+    "/activities/{activityId}": {
+      "schema": {
+        "$ref": "#/entities/ActivityLog"
+      },
+      "description": "Activity telemetry log scoped to the owner or admin."
+    }
+  }
+}

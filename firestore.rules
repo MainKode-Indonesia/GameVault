@@ -1,0 +1,459 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net (Default Deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Core Primitives
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isVerifiedOwner(userId) {
+      return isVerifiedUser() && request.auth.uid == userId;
+    }
+
+    // Registered Google Admin Middleware Guard
+    function isBootstrappedAdmin() {
+      return isVerifiedUser() && request.auth.token.email in ['mainkode4@gmail.com'];
+    }
+
+    function isAdmin() {
+      return isBootstrappedAdmin() || (isVerifiedUser() && exists(/databases/$(database)/documents/admins/$(request.auth.uid)));
+    }
+
+    // Entity Validation Blueprints
+    function isValidGame(data) {
+      return data.keys().hasAll([
+        'title', 'description', 'size', 'genre', 'tags', 'rating', 'ratingSum', 'reviewCount',
+        'developer', 'releaseYear', 'bannerCoverUrl', 'verticalCoverUrl', 'screenshots',
+        'downloadLinks', 'featured', 'visibility', 'downloadsCount', 'createdBy',
+        'createdAt', 'updatedAt'
+      ])
+      && data.keys().hasOnly([
+        'title', 'description', 'size', 'genre', 'tags', 'rating', 'ratingSum', 'reviewCount',
+        'developer', 'releaseYear', 'bannerCoverUrl', 'verticalCoverUrl', 'screenshots',
+        'downloadLinks', 'featured', 'visibility', 'downloadsCount', 'createdBy',
+        'createdAt', 'updatedAt', 'adminUpdatedAt'
+      ])
+      && data.title is string && data.title.size() >= 2 && data.title.size() <= 120
+      && data.description is string && data.description.size() >= 10 && data.description.size() <= 4000
+      && data.size is string && data.size.size() >= 2 && data.size.size() <= 40
+      && data.genre in ['Action RPG', 'Tactical Shooter', 'Motorsport Sim', 'Strategy', 'Sci-Fi Adventure', 'Survival', 'Indie']
+      && data.tags is list && data.tags.size() >= 1 && data.tags.size() <= 10
+      && data.tags[0] is string && data.tags[0].size() >= 2 && data.tags[0].size() <= 30
+      && (data.rating is int || data.rating is float) && data.rating >= 0 && data.rating <= 5
+      && (data.ratingSum is int || data.ratingSum is float) && data.ratingSum >= 0
+      && data.reviewCount is int && data.reviewCount >= 0
+      && data.developer is string && data.developer.size() >= 2 && data.developer.size() <= 100
+      && data.releaseYear is string && data.releaseYear.size() >= 4 && data.releaseYear.size() <= 10 && data.releaseYear.matches('^[0-9]{4}$')
+      && data.bannerCoverUrl is string && data.bannerCoverUrl.size() >= 5 && data.bannerCoverUrl.size() <= 1000
+      && data.verticalCoverUrl is string && data.verticalCoverUrl.size() >= 5 && data.verticalCoverUrl.size() <= 1000
+      && data.screenshots is list && data.screenshots.size() >= 3 && data.screenshots.size() <= 10
+      && data.screenshots[0] is string && data.screenshots[0].size() >= 5 && data.screenshots[0].size() <= 1000
+      && data.downloadLinks is list && data.downloadLinks.size() >= 1 && data.downloadLinks.size() <= 12
+      && data.downloadLinks[0] is map
+      && data.downloadLinks[0].keys().hasAll(['label', 'provider', 'url', 'partInfo'])
+      && data.downloadLinks[0].keys().hasOnly(['label', 'provider', 'url', 'partInfo'])
+      && data.downloadLinks[0].label is string && data.downloadLinks[0].label.size() >= 1 && data.downloadLinks[0].label.size() <= 80
+      && data.downloadLinks[0].provider is string && data.downloadLinks[0].provider.size() >= 1 && data.downloadLinks[0].provider.size() <= 60
+      && data.downloadLinks[0].url is string && data.downloadLinks[0].url.size() >= 5 && data.downloadLinks[0].url.size() <= 1000
+      && data.downloadLinks[0].partInfo is string && data.downloadLinks[0].partInfo.size() <= 80
+      && data.featured is bool
+      && data.visibility in ['public', 'draft']
+      && (data.downloadsCount is int || data.downloadsCount is float) && data.downloadsCount >= 0
+      && isValidId(data.createdBy)
+      && data.createdAt is timestamp
+      && data.updatedAt is timestamp
+      && (!('adminUpdatedAt' in data) || data.adminUpdatedAt is timestamp);
+    }
+
+    function isValidReview(data) {
+      return data.keys().hasAll([
+        'gameId', 'userId', 'userName', 'userPhoto', 'rating', 'content', 'visibility', 'createdAt', 'updatedAt'
+      ])
+      && data.keys().hasOnly([
+        'gameId', 'userId', 'userName', 'userPhoto', 'rating', 'content', 'visibility', 'createdAt', 'updatedAt'
+      ])
+      && isValidId(data.gameId)
+      && isValidId(data.userId)
+      && data.userName is string && data.userName.size() >= 1 && data.userName.size() <= 80
+      && data.userPhoto is string && data.userPhoto.size() <= 500
+      && data.rating is int && data.rating >= 1 && data.rating <= 5
+      && data.content is string && data.content.size() >= 2 && data.content.size() <= 1000
+      && data.visibility == 'public'
+      && data.createdAt is timestamp
+      && data.updatedAt is timestamp;
+    }
+
+    function isValidComment(data) {
+      return data.keys().hasAll([
+        'gameId', 'userId', 'userName', 'userPhoto', 'text', 'visibility', 'createdAt'
+      ])
+      && data.keys().hasOnly([
+        'gameId', 'userId', 'userName', 'userPhoto', 'text', 'visibility', 'createdAt'
+      ])
+      && isValidId(data.gameId)
+      && isValidId(data.userId)
+      && data.userName is string && data.userName.size() >= 1 && data.userName.size() <= 80
+      && data.userPhoto is string && data.userPhoto.size() <= 500
+      && data.text is string && data.text.size() >= 1 && data.text.size() <= 1000
+      && data.visibility == 'public'
+      && data.createdAt is timestamp;
+    }
+
+    function isValidUserProfile(data) {
+      return data.keys().hasAll(['uid', 'email', 'displayName', 'photoURL', 'role', 'createdAt', 'lastLoginAt'])
+      && data.keys().hasOnly(['uid', 'email', 'displayName', 'photoURL', 'role', 'createdAt', 'lastLoginAt'])
+      && isValidId(data.uid)
+      && data.email is string && data.email.size() <= 160
+      && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80
+      && data.photoURL is string && data.photoURL.size() <= 500
+      && data.role in ['user', 'admin']
+      && data.createdAt is timestamp
+      && data.lastLoginAt is timestamp;
+    }
+
+    function isValidPublicUserBadge(data) {
+      return data.keys().hasAll(['uid', 'displayName', 'role', 'memberSince', 'updatedAt'])
+      && data.keys().hasOnly(['uid', 'displayName', 'role', 'memberSince', 'updatedAt'])
+      && isValidId(data.uid)
+      && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80
+      && data.role in ['user', 'admin']
+      && data.memberSince is timestamp
+      && data.updatedAt is timestamp;
+    }
+
+    function isValidWishlistItem(data) {
+      return data.keys().hasAll(['userId', 'gameId', 'gameTitle', 'gameVerticalCover', 'gameGenre', 'gameSize', 'addedAt'])
+      && data.keys().hasOnly(['userId', 'gameId', 'gameTitle', 'gameVerticalCover', 'gameGenre', 'gameSize', 'addedAt'])
+      && isValidId(data.userId)
+      && isValidId(data.gameId)
+      && data.gameTitle is string && data.gameTitle.size() >= 1 && data.gameTitle.size() <= 120
+      && data.gameVerticalCover is string && data.gameVerticalCover.size() >= 1 && data.gameVerticalCover.size() <= 1000
+      && data.gameGenre is string && data.gameGenre.size() >= 1 && data.gameGenre.size() <= 50
+      && data.gameSize is string && data.gameSize.size() >= 1 && data.gameSize.size() <= 40
+      && data.addedAt is timestamp;
+    }
+
+    function isValidActivityLog(data) {
+      return data.keys().hasAll(['userId', 'userName', 'actionType', 'gameId', 'gameTitle', 'detail', 'createdAt'])
+      && data.keys().hasOnly(['userId', 'userName', 'actionType', 'gameId', 'gameTitle', 'detail', 'createdAt'])
+      && isValidId(data.userId)
+      && isValidId(data.gameId)
+      && data.userName is string && data.userName.size() >= 1 && data.userName.size() <= 80
+      && data.actionType in ['wishlist_add', 'wishlist_remove', 'download', 'comment', 'game_publish']
+      && data.gameTitle is string && data.gameTitle.size() >= 1 && data.gameTitle.size() <= 120
+      && data.detail is string && data.detail.size() >= 1 && data.detail.size() <= 240
+      && data.createdAt is timestamp;
+    }
+
+    function isValidRatingAggregateTransition(gameId) {
+      let reviewPath = /databases/$(database)/documents/reviews/$(gameId + '_' + request.auth.uid);
+      return existing().visibility == 'public'
+        && incoming().diff(existing()).affectedKeys().hasOnly(['rating', 'ratingSum', 'reviewCount', 'updatedAt'])
+        && (
+          (
+            incoming().reviewCount == 0
+            && incoming().ratingSum == 0
+            && incoming().rating == 0
+          ) ||
+          (
+            incoming().reviewCount > 0
+            && incoming().rating >= 1
+            && incoming().rating <= 5
+            && (incoming().rating * incoming().reviewCount - incoming().ratingSum) >= -(0.06 * incoming().reviewCount)
+            && (incoming().rating * incoming().reviewCount - incoming().ratingSum) <= (0.06 * incoming().reviewCount)
+          )
+        )
+        && (
+          (
+            existsAfter(reviewPath)
+            && getAfter(reviewPath).data.updatedAt == request.time
+            && (
+              (
+                !exists(reviewPath)
+                && incoming().reviewCount == existing().reviewCount + 1
+                && incoming().ratingSum == existing().ratingSum + getAfter(reviewPath).data.rating
+              ) ||
+              (
+                exists(reviewPath)
+                && incoming().reviewCount == existing().reviewCount
+                && incoming().ratingSum == existing().ratingSum - get(reviewPath).data.rating + getAfter(reviewPath).data.rating
+              )
+            )
+          ) ||
+          (
+            exists(reviewPath)
+            && !existsAfter(reviewPath)
+            && incoming().reviewCount == existing().reviewCount - 1
+            && incoming().ratingSum == existing().ratingSum - get(reviewPath).data.rating
+          )
+        );
+    }
+
+    // Connection test document
+    match /test/connection {
+      allow get: if true;
+    }
+
+    // Admin registry (read-only for owner/admin)
+    match /admins/{adminId} {
+      allow get: if isValidId(adminId) && (isOwner(adminId) || isBootstrappedAdmin());
+      allow list, create, update, delete: if false;
+    }
+
+    // Games Catalog (Only registered admins can create/edit/delete games; verified users can atomically update rating aggregates via /reviews or download counter)
+    match /games/{gameId} {
+      allow get: if isValidId(gameId) && (isAdmin() || (resource != null && existing().visibility == 'public'));
+      allow list: if existing().visibility == 'public' || isBootstrappedAdmin();
+
+      allow create: if isValidId(gameId)
+        && isAdmin()
+        && isValidGame(incoming())
+        && incoming().createdBy == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && (!('adminUpdatedAt' in incoming()) || incoming().adminUpdatedAt == request.time);
+
+      allow update: if isValidId(gameId)
+        && isVerifiedUser()
+        && isValidGame(incoming())
+        && incoming().createdBy == existing().createdBy
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          (
+            isAdmin() &&
+            (!('adminUpdatedAt' in incoming()) || !incoming().diff(existing()).affectedKeys().hasAny(['adminUpdatedAt']) || incoming().adminUpdatedAt == request.time)
+          ) ||
+          (
+            existing().visibility == 'public'
+            && incoming().downloadsCount == existing().downloadsCount + 1
+            && incoming().diff(existing()).affectedKeys().hasOnly(['downloadsCount', 'updatedAt'])
+          ) ||
+          isValidRatingAggregateTransition(gameId)
+        );
+
+      allow delete: if isValidId(gameId) && isAdmin();
+    }
+
+    // Top-Level User Reviews Collection (5-Star Rating + Review Text, keyed as {gameId}_{userId})
+    match /reviews/{reviewId} {
+      allow get: if isValidId(reviewId)
+        && (
+          (
+            isVerifiedUser()
+            && resource == null
+            && reviewId.matches('^.+_' + request.auth.uid + '$')
+          ) ||
+          (
+            resource != null
+            && existing().visibility == 'public'
+            && exists(/databases/$(database)/documents/games/$(existing().gameId))
+          )
+        );
+      allow list: if existing().visibility == 'public';
+
+      allow create: if isValidId(reviewId)
+        && isVerifiedUser()
+        && isValidReview(incoming())
+        && incoming().userId == request.auth.uid
+        && reviewId == incoming().gameId + '_' + request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && exists(/databases/$(database)/documents/games/$(incoming().gameId))
+        && getAfter(/databases/$(database)/documents/games/$(incoming().gameId)).data.reviewCount
+           == get(/databases/$(database)/documents/games/$(incoming().gameId)).data.reviewCount + 1
+        && getAfter(/databases/$(database)/documents/games/$(incoming().gameId)).data.ratingSum
+           == get(/databases/$(database)/documents/games/$(incoming().gameId)).data.ratingSum + incoming().rating;
+
+      allow update: if isValidId(reviewId)
+        && isVerifiedUser()
+        && isValidReview(incoming())
+        && incoming().gameId == existing().gameId
+        && incoming().userId == existing().userId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && existing().userId == request.auth.uid
+        && incoming().diff(existing()).affectedKeys().hasOnly(['rating', 'content', 'updatedAt'])
+        && getAfter(/databases/$(database)/documents/games/$(existing().gameId)).data.reviewCount
+           == get(/databases/$(database)/documents/games/$(existing().gameId)).data.reviewCount
+        && getAfter(/databases/$(database)/documents/games/$(existing().gameId)).data.ratingSum
+           == get(/databases/$(database)/documents/games/$(existing().gameId)).data.ratingSum - existing().rating + incoming().rating;
+
+      allow delete: if isValidId(reviewId)
+        && isVerifiedUser()
+        && (
+          (
+            existing().userId == request.auth.uid
+            && getAfter(/databases/$(database)/documents/games/$(existing().gameId)).data.reviewCount
+               == get(/databases/$(database)/documents/games/$(existing().gameId)).data.reviewCount - 1
+            && getAfter(/databases/$(database)/documents/games/$(existing().gameId)).data.ratingSum
+               == get(/databases/$(database)/documents/games/$(existing().gameId)).data.ratingSum - existing().rating
+          ) ||
+          isAdmin()
+        );
+    }
+
+    // Top-Level User Comments Collection (Multiple comments per user linked via gameId)
+    match /comments/{commentId} {
+      allow get: if isValidId(commentId)
+        && (
+          isAdmin() ||
+          (
+            resource != null
+            && existing().visibility == 'public'
+            && exists(/databases/$(database)/documents/games/$(existing().gameId))
+          )
+        );
+      allow list: if existing().visibility == 'public';
+
+      allow create: if isValidId(commentId)
+        && isVerifiedUser()
+        && isValidComment(incoming())
+        && incoming().userId == request.auth.uid
+        && incoming().createdAt == request.time
+        && exists(/databases/$(database)/documents/games/$(incoming().gameId))
+        && get(/databases/$(database)/documents/games/$(incoming().gameId)).data.visibility == 'public';
+
+      allow update: if false;
+
+      allow delete: if isValidId(commentId)
+        && isVerifiedUser()
+        && (existing().userId == request.auth.uid || isAdmin());
+    }
+
+    // Users & Private Wishlists (Strict PII Isolation)
+    match /users/{userId} {
+      allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow list: if isBootstrappedAdmin();
+
+      allow create: if isValidId(userId)
+        && isVerifiedOwner(userId)
+        && isValidUserProfile(incoming())
+        && incoming().uid == userId
+        && (incoming().role == 'user' || (isBootstrappedAdmin() && incoming().role == 'admin'))
+        && incoming().createdAt == request.time
+        && incoming().lastLoginAt == request.time;
+
+      allow update: if isValidId(userId)
+        && isVerifiedUser()
+        && isValidUserProfile(incoming())
+        && incoming().uid == existing().uid
+        && incoming().email == existing().email
+        && incoming().createdAt == existing().createdAt
+        && incoming().lastLoginAt == request.time
+        && (
+          isAdmin() ||
+          (
+            isVerifiedOwner(userId)
+            && incoming().role == existing().role
+            && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL', 'lastLoginAt'])
+          )
+        );
+
+      allow delete: if isValidId(userId) && isAdmin();
+
+      match /public/{docId} {
+        allow get: if isValidId(userId) && docId == 'profile';
+        allow list: if false;
+
+        allow create: if isValidId(userId)
+          && docId == 'profile'
+          && isVerifiedOwner(userId)
+          && isValidPublicUserBadge(incoming())
+          && incoming().uid == userId
+          && (incoming().role == 'user' || (isBootstrappedAdmin() && incoming().role == 'admin'))
+          && incoming().updatedAt == request.time
+          && (
+            incoming().memberSince == request.time ||
+            (
+              exists(/databases/$(database)/documents/users/$(userId)) &&
+              incoming().memberSince == get(/databases/$(database)/documents/users/$(userId)).data.createdAt
+            )
+          );
+
+        allow update: if isValidId(userId)
+          && docId == 'profile'
+          && isVerifiedUser()
+          && isValidPublicUserBadge(incoming())
+          && incoming().uid == existing().uid
+          && incoming().memberSince == existing().memberSince
+          && incoming().updatedAt == request.time
+          && (
+            isAdmin() ||
+            (
+              isVerifiedOwner(userId)
+              && incoming().role == existing().role
+              && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'updatedAt'])
+            )
+          );
+
+        allow delete: if isValidId(userId) && docId == 'profile' && isAdmin();
+      }
+
+      match /wishlist/{gameId} {
+        allow get: if isValidId(userId) && isValidId(gameId) && (isOwner(userId) || isAdmin());
+        allow list: if isSignedIn() && (existing().userId == request.auth.uid || isBootstrappedAdmin());
+
+        allow create: if isValidId(userId) && isValidId(gameId)
+          && isVerifiedOwner(userId)
+          && isValidWishlistItem(incoming())
+          && incoming().userId == userId
+          && incoming().gameId == gameId
+          && incoming().addedAt == request.time
+          && exists(/databases/$(database)/documents/games/$(gameId));
+
+        allow update: if false;
+
+        allow delete: if isValidId(userId) && isValidId(gameId)
+          && isVerifiedUser()
+          && (isOwner(userId) || isAdmin());
+      }
+    }
+
+    // User & Platform Activity Feed
+    match /activities/{activityId} {
+      allow get: if isValidId(activityId)
+        && isSignedIn()
+        && (isAdmin() || (resource != null && existing().userId == request.auth.uid));
+      allow list: if isSignedIn()
+        && (existing().userId == request.auth.uid || isBootstrappedAdmin());
+
+      allow create: if isValidId(activityId)
+        && isVerifiedUser()
+        && isValidActivityLog(incoming())
+        && incoming().userId == request.auth.uid
+        && incoming().createdAt == request.time
+        && exists(/databases/$(database)/documents/games/$(incoming().gameId));
+
+      allow update: if false;
+      allow delete: if isValidId(activityId) && isAdmin();
+    }
+  }
+}
