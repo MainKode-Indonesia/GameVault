@@ -29,7 +29,7 @@ Platform etalase game digital modern dengan pencarian real-time, distribusi mult
 
 ### 📦 Detail Game, Multi-Mirror & Notifikasi *What's New*
 - **Galeri Media & Poster 3:4**: Dilengkapi wide banner cover, switcher screenshot interaktif, dan fallback visual aman (`SafeImage`).
-- **Multi-Mirror Download & Link Verifier**: Mendukung berbagai sumber mirror (`Google Drive`, `MediaFire`, `Mega.nz`, `PixelDrain`, `GoFile`, `1Fichier`, `Dropbox`, `Direct CDN`) dengan validasi URL server-side yang memblokir alamat jaringan privat/SSRF.
+- **Multi-Mirror Download & Link Verifier**: Mendukung berbagai sumber mirror (`GitHub Releases`, `SourceForge`, `Itch.io`, `Flathub`, `Official CDN`, `Official Site`, `DataNodes`, `Google Drive`, `MediaFire`, `Mega.nz`, `PixelDrain`, `GoFile`, `1Fichier`, `Dropbox`, `Direct CDN`) dengan validasi URL server-side yang memblokir alamat jaringan privat/SSRF.
 - **What's New Banner & Toast**: Menampilkan notifikasi otomatis saat pengguna membuka halaman game yang diperbarui admin dalam 48 jam terakhir.
 - **Tombol Share**: Menyalin URL halaman game ke clipboard disertai feedback toast instan.
 

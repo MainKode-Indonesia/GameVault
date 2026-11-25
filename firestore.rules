@@ -78,11 +78,12 @@ service cloud.firestore {
       && data.downloadLinks is list && data.downloadLinks.size() >= 1 && data.downloadLinks.size() <= 12
       && data.downloadLinks[0] is map
       && data.downloadLinks[0].keys().hasAll(['label', 'provider', 'url', 'partInfo'])
-      && data.downloadLinks[0].keys().hasOnly(['label', 'provider', 'url', 'partInfo'])
+      && data.downloadLinks[0].keys().hasOnly(['label', 'provider', 'url', 'partInfo', 'healthStatus'])
       && data.downloadLinks[0].label is string && data.downloadLinks[0].label.size() >= 1 && data.downloadLinks[0].label.size() <= 80
       && data.downloadLinks[0].provider is string && data.downloadLinks[0].provider.size() >= 1 && data.downloadLinks[0].provider.size() <= 60
       && data.downloadLinks[0].url is string && data.downloadLinks[0].url.size() >= 5 && data.downloadLinks[0].url.size() <= 1000
       && data.downloadLinks[0].partInfo is string && data.downloadLinks[0].partInfo.size() <= 80
+      && (!('healthStatus' in data.downloadLinks[0]) || data.downloadLinks[0].healthStatus in ['online', 'degraded', 'offline'])
       && data.featured is bool
       && data.visibility in ['public', 'draft']
       && (data.downloadsCount is int || data.downloadsCount is float) && data.downloadsCount >= 0
@@ -166,7 +167,16 @@ service cloud.firestore {
       && isValidId(data.userId)
       && isValidId(data.gameId)
       && data.userName is string && data.userName.size() >= 1 && data.userName.size() <= 80
-      && data.actionType in ['wishlist_add', 'wishlist_remove', 'download', 'comment', 'game_publish']
+      && data.actionType in [
+        'wishlist_add',
+        'wishlist_remove',
+        'download',
+        'comment',
+        'game_publish',
+        'game_update',
+        'game_delete',
+        'catalog_seed'
+      ]
       && data.gameTitle is string && data.gameTitle.size() >= 1 && data.gameTitle.size() <= 120
       && data.detail is string && data.detail.size() >= 1 && data.detail.size() <= 240
       && data.createdAt is timestamp;
@@ -450,7 +460,14 @@ service cloud.firestore {
         && isValidActivityLog(incoming())
         && incoming().userId == request.auth.uid
         && incoming().createdAt == request.time
-        && exists(/databases/$(database)/documents/games/$(incoming().gameId));
+        && (
+          !(incoming().actionType in ['game_publish', 'game_update', 'game_delete', 'catalog_seed'])
+          || isAdmin()
+        )
+        && (
+          incoming().actionType == 'game_delete'
+          || exists(/databases/$(database)/documents/games/$(incoming().gameId))
+        );
 
       allow update: if false;
       allow delete: if isValidId(activityId) && isAdmin();

@@ -83,7 +83,7 @@
         },
         "downloadLinks": {
           "type": "array",
-          "description": "Array of mirror download sources (label, provider, url, partInfo)."
+          "description": "Array of mirror download sources (label, provider, url, partInfo, optional healthStatus: online | degraded | offline)."
         },
         "featured": {
           "type": "boolean",
@@ -409,7 +409,16 @@
         },
         "actionType": {
           "type": "string",
-          "enum": ["wishlist_add", "wishlist_remove", "download", "comment", "game_publish"]
+          "enum": [
+            "wishlist_add",
+            "wishlist_remove",
+            "download",
+            "comment",
+            "game_publish",
+            "game_update",
+            "game_delete",
+            "catalog_seed"
+          ]
         },
         "gameId": {
           "type": "string",

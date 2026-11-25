@@ -40,6 +40,13 @@ import {
   OperationType,
 } from './lib/firebase';
 import { STARTER_GAMES } from './data/starterCatalog';
+import { checkMirrorHealth } from './lib/mirrorUtils';
+import {
+  clearWishlistCache,
+  loadLastCachedWishlist,
+  loadWishlistFromCache,
+  saveWishlistToCache,
+} from './lib/wishlistCache';
 import {
   GAME_GENRES,
   resolveBannerCover,
@@ -47,6 +54,7 @@ import {
   type ActivityLog,
   type GameGenre,
   type GameItem,
+  type MirrorValidationResult,
   type UserProfile,
   type WishlistItem,
 } from './types/game';
@@ -108,10 +116,29 @@ export default function App() {
   const [formModalOpen, setFormModalOpen] = useState(false);
   const [editingGame, setEditingGame] = useState<GameItem | null>(null);
   const [seeding, setSeeding] = useState(false);
+  const [mirrorHealthMap, setMirrorHealthMap] = useState<
+    Record<string, MirrorValidationResult>
+  >({});
+  const [isOffline, setIsOffline] = useState<boolean>(() =>
+    typeof navigator !== 'undefined' ? !navigator.onLine : false
+  );
+  const [wishlistFromCache, setWishlistFromCache] = useState(false);
 
   const autoSeededRef = useRef(false);
   const justSignedInRef = useRef(false);
+  const mirrorCheckTickRef = useRef(0);
   const { showToast } = useToast();
+
+  useEffect(() => {
+    const handleOnline = () => setIsOffline(false);
+    const handleOffline = () => setIsOffline(true);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', theme === 'dark');
@@ -327,13 +354,32 @@ export default function App() {
     }
   }, [authReady, gamesLoading, isAdmin, user, games]);
 
-  // Subscribe to user's private Wishlist when authenticated
+  // Subscribe to user's private Wishlist when authenticated, with localStorage offline cache fallback
   useEffect(() => {
-    if (!authReady || !user) {
+    if (!authReady) return;
+
+    if (!user) {
+      if (isOffline) {
+        const cached = loadLastCachedWishlist();
+        if (cached) {
+          setWishlist(cached.items);
+          setWishlistFromCache(true);
+          return;
+        }
+      }
       setWishlist([]);
+      setWishlistFromCache(false);
       return;
     }
 
+    const cached = loadWishlistFromCache(user.uid);
+    if (cached) {
+      setWishlist(cached.items);
+      setWishlistFromCache(true);
+    }
+
+    const userLabel =
+      user.displayName || user.email?.split('@')[0] || 'Player';
     const wishlistPath = `users/${user.uid}/wishlist`;
     const q = query(
       collection(db, wishlistPath),
@@ -348,14 +394,22 @@ export default function App() {
         }));
         list.sort((a, b) => toMillis(b.addedAt) - toMillis(a.addedAt));
         setWishlist(list);
+        setWishlistFromCache(isOffline);
+        saveWishlistToCache(user.uid, list, userLabel);
       },
       (error) => {
+        const fallback = loadWishlistFromCache(user.uid);
+        if (fallback) {
+          setWishlist(fallback.items);
+          setWishlistFromCache(true);
+          return;
+        }
         handleFirestoreError(error, OperationType.LIST, wishlistPath);
       }
     );
 
     return () => unsubscribe();
-  }, [authReady, user]);
+  }, [authReady, user, isOffline]);
 
   // Subscribe to Activity Logs when authenticated
   useEffect(() => {
@@ -410,11 +464,14 @@ export default function App() {
 
   const handleSignOut = async () => {
     setAuthLoading(true);
+    const currentUid = user?.uid;
     try {
       await signOut(auth);
+      clearWishlistCache(currentUid);
       setIsAdmin(false);
       setUserProfile(null);
       setWishlist([]);
+      setWishlistFromCache(false);
       setActivities([]);
       showToast({
         title: 'Signed out',
@@ -556,10 +613,12 @@ export default function App() {
       await addDoc(collection(db, 'activities'), {
         userId: user.uid,
         userName: (user.displayName || user.email?.split('@')[0] || 'Admin').slice(0, 80),
-        actionType: 'game_publish',
+        actionType: 'catalog_seed',
         gameId: STARTER_GAMES[0].id,
         gameTitle: 'Starter Catalog (3 Games)',
-        detail: 'Published initial catalog with banner + vertical covers',
+        detail: isManual
+          ? 'Manually seeded starter catalog (3 games)'
+          : 'Auto-seeded starter catalog (3 games)',
         createdAt: serverTimestamp(),
       });
     } catch (error) {
@@ -572,6 +631,15 @@ export default function App() {
   const handleToggleWishlist = async (game: GameItem) => {
     if (!user) {
       void handleSignIn();
+      return;
+    }
+
+    if (isOffline) {
+      showToast({
+        title: 'Offline mode',
+        description: 'Cached wishlist is read-only until your connection is restored.',
+        variant: 'info',
+      });
       return;
     }
 
@@ -599,6 +667,8 @@ export default function App() {
     try {
       if (existsInWishlist) {
         await deleteDoc(itemRef);
+        const nextList = wishlist.filter((w) => w.gameId !== game.id);
+        saveWishlistToCache(user.uid, nextList, displayName);
         await addDoc(collection(db, 'activities'), {
           userId: user.uid,
           userName: displayName,
@@ -614,6 +684,16 @@ export default function App() {
           variant: 'info',
         });
       } else {
+        const newWishlistItem: WishlistItem = {
+          id: game.id,
+          userId: user.uid,
+          gameId: game.id,
+          gameTitle: game.title.slice(0, 120),
+          gameVerticalCover: resolveVerticalCover(game).slice(0, 1000),
+          gameGenre: game.genre.slice(0, 50),
+          gameSize: game.size.slice(0, 40),
+          addedAt: { toMillis: () => Date.now() },
+        };
         await setDoc(itemRef, {
           userId: user.uid,
           gameId: game.id,
@@ -623,6 +703,7 @@ export default function App() {
           gameSize: game.size.slice(0, 40),
           addedAt: serverTimestamp(),
         });
+        saveWishlistToCache(user.uid, [newWishlistItem, ...wishlist], displayName);
         await addDoc(collection(db, 'activities'), {
           userId: user.uid,
           userName: displayName,
@@ -685,7 +766,7 @@ export default function App() {
         await addDoc(collection(db, 'activities'), {
           userId: user.uid,
           userName: displayName,
-          actionType: 'game_publish',
+          actionType: 'game_update',
           gameId: existingId,
           gameTitle: values.title.slice(0, 120),
           detail: `Updated build (${values.downloadLinks.length} mirrors)`.slice(0, 240),
@@ -749,8 +830,25 @@ export default function App() {
   const handleDeleteGame = async (game: GameItem) => {
     if (!user || !isAdmin) return;
     const path = `games/${game.id}`;
+    const displayName = (
+      user.displayName ||
+      user.email?.split('@')[0] ||
+      'Admin'
+    ).slice(0, 80);
     try {
       await deleteDoc(doc(db, 'games', game.id));
+      await addDoc(collection(db, 'activities'), {
+        userId: user.uid,
+        userName: displayName,
+        actionType: 'game_delete',
+        gameId: game.id,
+        gameTitle: game.title.slice(0, 120),
+        detail: `Deleted game from catalog (${game.genre} · ${game.downloadLinks.length} mirrors)`.slice(
+          0,
+          240
+        ),
+        createdAt: serverTimestamp(),
+      });
       if (selectedGameId === game.id) setSelectedGameId(null);
       showToast({
         title: 'Game removed',
@@ -769,7 +867,7 @@ export default function App() {
 
   const isUsingPreviewCatalog = !gamesLoading && publicGames.length === 0;
 
-  const displayGames = useMemo<GameItem[]>(() => {
+  const baseGames = useMemo<GameItem[]>(() => {
     if (publicGames.length > 0) return publicGames;
     if (gamesLoading) return [];
     return STARTER_GAMES.map((seed) => ({
@@ -777,6 +875,42 @@ export default function App() {
       createdBy: 'starter',
     }));
   }, [publicGames, gamesLoading]);
+
+  // Periodically simulate & refresh mirror health status across every game's downloadLinks
+  useEffect(() => {
+    const sourceGames = games.length > 0 ? games : baseGames;
+    if (sourceGames.length === 0) return;
+
+    const runHealthCheck = () => {
+      const tick = mirrorCheckTickRef.current;
+      mirrorCheckTickRef.current += 1;
+      const nextMap: Record<string, MirrorValidationResult> = {};
+      for (const game of sourceGames) {
+        for (const mirror of game.downloadLinks ?? []) {
+          if (mirror.url) {
+            nextMap[mirror.url] = checkMirrorHealth(mirror, tick);
+          }
+        }
+      }
+      setMirrorHealthMap(nextMap);
+    };
+
+    runHealthCheck();
+    const intervalId = window.setInterval(runHealthCheck, 15_000);
+    return () => window.clearInterval(intervalId);
+  }, [games, baseGames]);
+
+  const displayGames = useMemo<GameItem[]>(() => {
+    return baseGames.map((game) => ({
+      ...game,
+      downloadLinks: (game.downloadLinks ?? []).map((mirror) => {
+        const checked = mirrorHealthMap[mirror.url];
+        return checked
+          ? { ...mirror, healthStatus: checked.health }
+          : mirror;
+      }),
+    }));
+  }, [baseGames, mirrorHealthMap]);
 
   const featuredGame = useMemo(() => {
     return (
@@ -837,13 +971,22 @@ export default function App() {
     return result;
   }, [displayGames, searchQuery, selectedGenre, selectedTags, sortBy]);
 
-  const selectedGame = useMemo(
-    () =>
-      games.find((g) => g.id === selectedGameId) ||
+  const selectedGame = useMemo(() => {
+    const found =
       displayGames.find((g) => g.id === selectedGameId) ||
-      null,
-    [games, displayGames, selectedGameId]
-  );
+      games.find((g) => g.id === selectedGameId) ||
+      null;
+    if (!found) return null;
+    return {
+      ...found,
+      downloadLinks: (found.downloadLinks ?? []).map((mirror) => {
+        const checked = mirrorHealthMap[mirror.url];
+        return checked
+          ? { ...mirror, healthStatus: checked.health }
+          : mirror;
+      }),
+    };
+  }, [games, displayGames, selectedGameId, mirrorHealthMap]);
 
   const wishlistGameIds = useMemo(
     () => new Set(wishlist.map((w) => w.gameId)),
@@ -1398,16 +1541,24 @@ export default function App() {
         {/* Wishlist View: ONLY vertical covers (3:4), zero extra text or metadata */}
         {activeView === 'wishlist' && (
           <div className="max-w-[1440px] mx-auto px-6 py-8 space-y-8">
-            <div className="pb-6 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
-              <h1 className="text-2xl md:text-3xl font-bold text-slate-900 dark:text-white">Wishlist</h1>
-              {user && (
+            <div className="pb-6 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-3">
+                <h1 className="text-2xl md:text-3xl font-bold text-slate-900 dark:text-white">Wishlist</h1>
+                {(isOffline || wishlistFromCache) && wishlist.length > 0 && (
+                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-amber-500/10 border border-amber-500/30 text-xs font-medium text-amber-700 dark:text-amber-300">
+                    <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
+                    <span>{isOffline ? 'Offline Cache' : 'Cached'}</span>
+                  </span>
+                )}
+              </div>
+              {(user || wishlist.length > 0) && (
                 <span className="text-sm font-mono tabular-nums text-slate-600 dark:text-slate-400">
                   {wishlist.length}
                 </span>
               )}
             </div>
 
-            {!user ? (
+            {!user && !(isOffline && wishlist.length > 0) ? (
               <div className="max-w-lg mx-auto py-12 text-center space-y-4">
                 <p className="text-slate-600 dark:text-slate-300 text-base">
                   Sign in with your Google account to view your saved wishlist covers.
@@ -1567,6 +1718,7 @@ export default function App() {
       {selectedGame && (
         <GameDetailModal
           game={selectedGame}
+          periodicMirrorHealth={mirrorHealthMap}
           user={user}
           userAvatarUrl={userProfile?.photoURL || user?.photoURL || ''}
           userDisplayName={userProfile?.displayName || user?.displayName || ''}

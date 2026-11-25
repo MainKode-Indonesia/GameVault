@@ -83,6 +83,7 @@ function detectMirrorProvider(hostname: string): string {
   if (host.includes('sourceforge.net')) return 'SourceForge';
   if (host.includes('itch.io')) return 'Itch.io';
   if (host.includes('flathub.org')) return 'Flathub';
+  if (host.includes('datanodes.')) return 'DataNodes';
   if (host.includes('drive.google.com') || host.includes('docs.google.com')) return 'Google Drive';
   if (host.includes('mediafire.com')) return 'MediaFire';
   if (host.includes('mega.nz') || host.includes('mega.co.nz')) return 'Mega.nz';
@@ -153,15 +154,70 @@ function requireAdmin(
   next();
 }
 
-async function inspectMirrorUrls(urls: unknown[]) {
+type MirrorHealthStatus = 'online' | 'degraded' | 'offline';
+
+interface MirrorInspectionResult {
+  url: string;
+  valid: boolean;
+  provider: string;
+  status: 'reachable' | 'format-ok' | 'blocked' | 'invalid';
+  health: MirrorHealthStatus;
+  latencyMs?: number;
+  statusCode?: number;
+  reason?: string;
+}
+
+const MIRROR_HEALTH_CACHE_TTL_MS = 60_000;
+const DEGRADED_LATENCY_THRESHOLD_MS = 1800;
+const mirrorHealthCache = new Map<
+  string,
+  { result: MirrorInspectionResult; expiresAt: number }
+>();
+
+async function probeRemoteMirror(targetUrl: string): Promise<{
+  statusCode: number;
+  latencyMs: number;
+}> {
+  const startedAt = Date.now();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 3000);
+  try {
+    let response = await fetch(targetUrl, {
+      method: 'HEAD',
+      redirect: 'manual',
+      signal: controller.signal,
+    });
+    if (response.status === 405 || response.status === 501) {
+      response = await fetch(targetUrl, {
+        method: 'GET',
+        headers: { Range: 'bytes=0-0' },
+        redirect: 'manual',
+        signal: controller.signal,
+      });
+    }
+    return {
+      statusCode: response.status,
+      latencyMs: Date.now() - startedAt,
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function inspectMirrorUrls(
+  urls: unknown[],
+  options: { forceRefresh?: boolean } = {}
+): Promise<MirrorInspectionResult[]> {
+  const now = Date.now();
   return Promise.all(
-    urls.map(async (rawUrl) => {
+    urls.map(async (rawUrl): Promise<MirrorInspectionResult> => {
       if (typeof rawUrl !== 'string' || rawUrl.trim().length > 1000) {
         return {
           url: String(rawUrl ?? ''),
           valid: false,
           provider: 'Unknown',
           status: 'invalid',
+          health: 'offline',
           reason: 'URL must be a string under 1000 characters.',
         };
       }
@@ -176,6 +232,7 @@ async function inspectMirrorUrls(urls: unknown[]) {
           valid: false,
           provider: 'Unknown',
           status: 'invalid',
+          health: 'offline',
           reason: 'Malformed URL syntax.',
         };
       }
@@ -186,6 +243,7 @@ async function inspectMirrorUrls(urls: unknown[]) {
           valid: false,
           provider: 'Unknown',
           status: 'blocked',
+          health: 'offline',
           reason: 'Only HTTP/HTTPS protocols are allowed.',
         };
       }
@@ -196,6 +254,7 @@ async function inspectMirrorUrls(urls: unknown[]) {
           valid: false,
           provider: 'Blocked',
           status: 'blocked',
+          health: 'offline',
           reason: 'Private or loopback network hosts are prohibited.',
         };
       }
@@ -216,35 +275,92 @@ async function inspectMirrorUrls(urls: unknown[]) {
           valid: false,
           provider: 'Placeholder',
           status: 'invalid',
+          health: 'offline',
           reason: 'Placeholder/dummy domains (example.*) are not allowed. Use a real mirror URL.',
         };
       }
 
-      try {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 2500);
-        const headRes = await fetch(parsed.toString(), {
-          method: 'HEAD',
-          redirect: 'manual',
-          signal: controller.signal,
-        });
-        clearTimeout(timer);
-        return {
-          url: trimmed,
-          valid: true,
-          provider,
-          status: headRes.status >= 200 && headRes.status < 400 ? 'reachable' : 'format-ok',
-          statusCode: headRes.status,
-        };
-      } catch {
-        return {
-          url: trimmed,
-          valid: true,
-          provider,
-          status: 'format-ok',
-          reason: 'Valid HTTPS mirror URL (remote host did not answer HEAD probe).',
-        };
+      const cacheKey = parsed.toString();
+      if (!options.forceRefresh) {
+        const cached = mirrorHealthCache.get(cacheKey);
+        if (cached && cached.expiresAt > now) {
+          return cached.result;
+        }
       }
+
+      let result: MirrorInspectionResult;
+      try {
+        const { statusCode, latencyMs } = await probeRemoteMirror(cacheKey);
+        if (statusCode >= 200 && statusCode < 400) {
+          const isSlow = latencyMs >= DEGRADED_LATENCY_THRESHOLD_MS;
+          result = {
+            url: trimmed,
+            valid: true,
+            provider,
+            status: 'reachable',
+            health: isSlow ? 'degraded' : 'online',
+            latencyMs,
+            statusCode,
+            reason: isSlow ? `Slow mirror response (${latencyMs} ms).` : undefined,
+          };
+        } else if (statusCode === 403 || statusCode === 405 || statusCode === 429 || statusCode === 503) {
+          result = {
+            url: trimmed,
+            valid: true,
+            provider,
+            status: 'format-ok',
+            health: 'degraded',
+            latencyMs,
+            statusCode,
+            reason: `Mirror responded with HTTP ${statusCode} (bot check or rate limit).`,
+          };
+        } else {
+          result = {
+            url: trimmed,
+            valid: false,
+            provider,
+            status: 'invalid',
+            health: 'offline',
+            latencyMs,
+            statusCode,
+            reason: `Mirror returned HTTP ${statusCode}.`,
+          };
+        }
+      } catch (err) {
+        const errObj = err as { name?: string; cause?: { code?: string }; code?: string };
+        const errCode = errObj?.cause?.code || errObj?.code || '';
+        const isTimeout = errObj?.name === 'AbortError';
+        const isDnsOrRefused =
+          errCode === 'ENOTFOUND' || errCode === 'EAI_AGAIN' || errCode === 'ECONNREFUSED';
+
+        if (isDnsOrRefused) {
+          result = {
+            url: trimmed,
+            valid: false,
+            provider,
+            status: 'invalid',
+            health: 'offline',
+            reason: 'Mirror host could not be reached.',
+          };
+        } else {
+          result = {
+            url: trimmed,
+            valid: true,
+            provider,
+            status: 'format-ok',
+            health: 'degraded',
+            reason: isTimeout
+              ? 'Mirror ping timed out (>3s).'
+              : 'Remote host did not answer automated HEAD probe.',
+          };
+        }
+      }
+
+      mirrorHealthCache.set(cacheKey, {
+        result,
+        expiresAt: Date.now() + MIRROR_HEALTH_CACHE_TTL_MS,
+      });
+      return result;
     })
   );
 }
@@ -267,30 +383,47 @@ async function startServer() {
     res.json({ verified: true, user: req.user });
   });
 
+  // Public SSRF-guarded mirror health ping endpoint (supports automatic status checks)
+  app.post('/api/mirrors/health', async (req: Request, res: Response) => {
+    const body = req.body as { urls?: unknown; forceRefresh?: unknown };
+    if (!Array.isArray(body?.urls) || body.urls.length === 0 || body.urls.length > 12) {
+      res.status(400).json({ error: 'Provide an array of 1 to 12 mirror URLs.' });
+      return;
+    }
+    const results = await inspectMirrorUrls(body.urls, {
+      forceRefresh: body.forceRefresh === true,
+    });
+    res.json({ results });
+  });
+
   // Admin-only mirror validation endpoint protected by requireAuth + requireAdmin middleware
   app.post(
     '/api/admin/mirrors/validate',
     requireAuth,
     requireAdmin,
     async (req: AuthenticatedRequest, res) => {
-      const body = req.body as { urls?: unknown };
+      const body = req.body as { urls?: unknown; forceRefresh?: unknown };
       if (!Array.isArray(body?.urls) || body.urls.length === 0 || body.urls.length > 12) {
         res.status(400).json({ error: 'Provide an array of 1 to 12 mirror URLs.' });
         return;
       }
-      const results = await inspectMirrorUrls(body.urls);
+      const results = await inspectMirrorUrls(body.urls, {
+        forceRefresh: body.forceRefresh === true,
+      });
       res.json({ results });
     }
   );
 
   // Authenticated user mirror verification endpoint
   app.post('/api/mirrors/validate', requireAuth, async (req: AuthenticatedRequest, res) => {
-    const body = req.body as { urls?: unknown };
+    const body = req.body as { urls?: unknown; forceRefresh?: unknown };
     if (!Array.isArray(body?.urls) || body.urls.length === 0 || body.urls.length > 12) {
       res.status(400).json({ error: 'Provide an array of 1 to 12 mirror URLs.' });
       return;
     }
-    const results = await inspectMirrorUrls(body.urls);
+    const results = await inspectMirrorUrls(body.urls, {
+      forceRefresh: body.forceRefresh === true,
+    });
     res.json({ results });
   });
 

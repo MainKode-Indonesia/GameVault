@@ -10,6 +10,7 @@ import {
   type DownloadMirror,
   type GameGenre,
   type GameItem,
+  type MirrorHealthStatus,
   type MirrorValidationResult,
 } from '../types/game';
 import { auth } from '../lib/firebase';
@@ -43,6 +44,7 @@ const MIRROR_PROVIDERS = [
   'Flathub',
   'Official CDN',
   'Official Site',
+  'DataNodes',
   'Google Drive',
   'Direct CDN',
   'MediaFire',
@@ -177,7 +179,7 @@ export function GameFormModal({ initialGame, onClose, onSave }: GameFormModalPro
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ urls }),
+        body: JSON.stringify({ urls, forceRefresh: true }),
       });
       const data = (await response.json()) as { results?: MirrorValidationResult[]; error?: string };
       if (!response.ok || !data.results) {
@@ -188,6 +190,12 @@ export function GameFormModal({ initialGame, onClose, onSave }: GameFormModalPro
         map[idx] = res;
       });
       setMirrorResults(map);
+      setDownloadLinks((prev) =>
+        prev.map((mirror, idx) => {
+          const res = map[idx];
+          return res ? { ...mirror, healthStatus: res.health } : mirror;
+        })
+      );
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unable to check mirrors.');
     } finally {
@@ -266,12 +274,18 @@ export function GameFormModal({ initialGame, onClose, onSave }: GameFormModalPro
       }
     }
 
-    const cleanMirrors = downloadLinks.map((m) => ({
-      label: m.label.trim().slice(0, 80),
-      provider: m.provider.trim().slice(0, 60) || 'Direct CDN',
-      url: m.url.trim(),
-      partInfo: m.partInfo.trim().slice(0, 80) || 'Full Build',
-    }));
+    const cleanMirrors: DownloadMirror[] = downloadLinks.map((m) => {
+      const base: DownloadMirror = {
+        label: m.label.trim().slice(0, 80),
+        provider: m.provider.trim().slice(0, 60) || 'Direct CDN',
+        url: m.url.trim(),
+        partInfo: m.partInfo.trim().slice(0, 80) || 'Full Build',
+      };
+      if (m.healthStatus === 'online' || m.healthStatus === 'degraded' || m.healthStatus === 'offline') {
+        base.healthStatus = m.healthStatus;
+      }
+      return base;
+    });
 
     if (cleanMirrors.length < 1) {
       setError('At least 1 download mirror link is required.');
@@ -618,7 +632,7 @@ export function GameFormModal({ initialGame, onClose, onSave }: GameFormModalPro
                     key={idx}
                     className="p-3.5 rounded-lg bg-slate-50 dark:bg-[#0B0E14] border border-slate-200 dark:border-slate-800 space-y-2.5"
                   >
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                    <div className="grid grid-cols-1 sm:grid-cols-4 gap-2.5">
                       <input
                         type="text"
                         required
@@ -657,6 +671,27 @@ export function GameFormModal({ initialGame, onClose, onSave }: GameFormModalPro
                         placeholder="Part Info (e.g. Full ISO)"
                         className="px-3 py-2 rounded-md bg-white dark:bg-[#131822] border border-slate-300 dark:border-slate-700/80 text-xs text-slate-900 dark:text-white placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:outline-none focus:border-blue-500"
                       />
+                      <select
+                        aria-label={`Mirror ${idx + 1} health status`}
+                        value={mirror.healthStatus ?? ''}
+                        onChange={(e) => {
+                          const val = e.target.value as MirrorHealthStatus | '';
+                          const next = [...downloadLinks];
+                          if (val) {
+                            next[idx] = { ...next[idx], healthStatus: val };
+                          } else {
+                            const { healthStatus: _removed, ...rest } = next[idx];
+                            next[idx] = rest;
+                          }
+                          setDownloadLinks(next);
+                        }}
+                        className="px-3 py-2 rounded-md bg-white dark:bg-[#131822] border border-slate-300 dark:border-slate-700/80 text-xs text-slate-900 dark:text-white focus:outline-none focus:border-blue-500"
+                      >
+                        <option value="">Health: Auto Ping</option>
+                        <option value="online">Health: Online</option>
+                        <option value="degraded">Health: Degraded</option>
+                        <option value="offline">Health: Offline</option>
+                      </select>
                     </div>
 
                     <div className="flex items-center gap-2">
@@ -686,15 +721,32 @@ export function GameFormModal({ initialGame, onClose, onSave }: GameFormModalPro
 
                     {check && (
                       <div
-                        className={`text-xs ${
-                          check.valid
+                        className={`flex items-center gap-2 text-xs ${
+                          check.health === 'online'
                             ? 'text-emerald-600 dark:text-emerald-400'
-                            : 'text-red-600 dark:text-red-400'
+                            : check.health === 'degraded'
+                              ? 'text-amber-600 dark:text-amber-400'
+                              : 'text-red-600 dark:text-red-400'
                         }`}
                       >
-                        {check.valid
-                          ? `Verified (${check.provider} · ${check.status})`
-                          : `Blocked: ${check.reason || 'Invalid URL'}`}
+                        <span
+                          className={`w-1.5 h-1.5 rounded-full ${
+                            check.health === 'online'
+                              ? 'bg-emerald-500'
+                              : check.health === 'degraded'
+                                ? 'bg-amber-500'
+                                : 'bg-red-500'
+                          }`}
+                        />
+                        <span>
+                          {check.health === 'online'
+                            ? `Online (${check.provider}${
+                                typeof check.latencyMs === 'number' ? ` · ${check.latencyMs}ms` : ''
+                              })`
+                            : check.health === 'degraded'
+                              ? `Degraded (${check.provider} · ${check.reason || check.status})`
+                              : `Offline: ${check.reason || 'Unreachable URL'}`}
+                        </span>
                       </div>
                     )}
                   </div>

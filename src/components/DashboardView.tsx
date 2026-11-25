@@ -1,16 +1,26 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import type { User } from 'firebase/auth';
 import {
+  collection,
+  limit,
+  onSnapshot,
+  query,
+  where,
+} from 'firebase/firestore';
+import {
   Check,
   ChevronLeft,
   ChevronRight,
   Edit3,
   Plus,
   Search,
+  ShieldAlert,
   Sparkles,
   Trash2,
 } from 'lucide-react';
+import { db, handleFirestoreError, OperationType } from '../lib/firebase';
 import {
+  ADMIN_AUDIT_ACTION_TYPES,
   isSafeHttpOrAssetUrl,
   resolveVerticalCover,
   type ActivityActionType,
@@ -44,10 +54,22 @@ const ACTION_LABELS: Record<ActivityActionType, string> = {
   wishlist_remove: 'Removed from Wishlist',
   download: 'Mirror Download',
   comment: 'Posted Review',
-  game_publish: 'Catalog Update',
+  game_publish: 'Game Published',
+  game_update: 'Game Updated',
+  game_delete: 'Game Deleted',
+  catalog_seed: 'Catalog Seeded',
 };
 
 const ACTIVITY_PAGE_SIZE = 5;
+const AUDIT_PAGE_SIZE = 8;
+
+function toMillis(ts: unknown): number {
+  if (!ts || typeof ts !== 'object') return 0;
+  const maybe = ts as { toMillis?: () => number };
+  return typeof maybe.toMillis === 'function' ? maybe.toMillis() : 0;
+}
+
+type DashboardSubView = 'overview' | 'audit';
 
 export function DashboardView({
   user,
@@ -65,8 +87,13 @@ export function DashboardView({
   onSeedStarterCatalog,
   seeding,
 }: DashboardViewProps) {
+  const [dashboardSubView, setDashboardSubView] = useState<DashboardSubView>('overview');
   const [activityFilter, setActivityFilter] = useState<'all' | ActivityActionType>('all');
   const [activityPage, setActivityPage] = useState(1);
+  const [auditLogs, setAuditLogs] = useState<ActivityLog[]>([]);
+  const [auditLoading, setAuditLoading] = useState(false);
+  const [auditFilter, setAuditFilter] = useState<'all' | ActivityActionType>('all');
+  const [auditPage, setAuditPage] = useState(1);
   const [catalogSearch, setCatalogSearch] = useState('');
   const [profileName, setProfileName] = useState('');
   const [selectedAvatarUrl, setSelectedAvatarUrl] = useState('');
@@ -83,6 +110,44 @@ export function DashboardView({
     );
     setSelectedAvatarUrl(userProfile?.photoURL || user.photoURL || RETRO_AVATARS[0].url);
   }, [user, userProfile]);
+
+  // Query Firestore 'activities' collection where actionType is admin-related for the Admin Audit Log view
+  useEffect(() => {
+    if (!user || !isAdmin) {
+      setAuditLogs([]);
+      setAuditLoading(false);
+      if (dashboardSubView === 'audit') {
+        setDashboardSubView('overview');
+      }
+      return;
+    }
+
+    setAuditLoading(true);
+    const auditQuery = query(
+      collection(db, 'activities'),
+      where('actionType', 'in', ADMIN_AUDIT_ACTION_TYPES),
+      limit(50)
+    );
+
+    const unsubscribe = onSnapshot(
+      auditQuery,
+      (snapshot) => {
+        const list: ActivityLog[] = snapshot.docs.map((d) => ({
+          id: d.id,
+          ...(d.data() as Omit<ActivityLog, 'id'>),
+        }));
+        list.sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
+        setAuditLogs(list);
+        setAuditLoading(false);
+      },
+      (error) => {
+        setAuditLoading(false);
+        handleFirestoreError(error, OperationType.LIST, 'activities');
+      }
+    );
+
+    return () => unsubscribe();
+  }, [user, isAdmin]);
 
   const handleProfileSubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -167,6 +232,34 @@ export function DashboardView({
     return 'Just now';
   };
 
+  const filteredAuditLogs = auditLogs.filter((log) =>
+    auditFilter === 'all' ? true : log.actionType === auditFilter
+  );
+  const totalAuditPages = Math.max(
+    1,
+    Math.ceil(filteredAuditLogs.length / AUDIT_PAGE_SIZE)
+  );
+  const currentAuditPage = Math.min(auditPage, totalAuditPages);
+  const auditStartIndex = (currentAuditPage - 1) * AUDIT_PAGE_SIZE;
+  const paginatedAuditLogs = filteredAuditLogs.slice(
+    auditStartIndex,
+    auditStartIndex + AUDIT_PAGE_SIZE
+  );
+
+  const getAuditActionBadgeStyle = (actionType: ActivityActionType) => {
+    switch (actionType) {
+      case 'game_delete':
+        return 'bg-red-500/10 text-red-700 dark:text-red-300 border-red-500/30';
+      case 'catalog_seed':
+        return 'bg-purple-500/10 text-purple-700 dark:text-purple-300 border-purple-500/30';
+      case 'game_update':
+        return 'bg-blue-500/10 text-blue-700 dark:text-blue-300 border-blue-500/30';
+      case 'game_publish':
+      default:
+        return 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/30';
+    }
+  };
+
   return (
     <div className="max-w-[1440px] mx-auto px-6 py-8 space-y-10">
       {/* Unified Dashboard Header — Game creation buttons are gated strictly by verified admin middleware */}
@@ -182,6 +275,40 @@ export function DashboardView({
 
         {isAdmin && (
           <div className="flex flex-wrap items-center gap-3">
+            <div className="inline-flex items-center p-1 rounded-lg bg-slate-100 dark:bg-[#131822] border border-slate-200 dark:border-slate-800">
+              <button
+                type="button"
+                onClick={() => setDashboardSubView('overview')}
+                className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                  dashboardSubView === 'overview'
+                    ? 'bg-blue-600 text-white'
+                    : 'text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white'
+                }`}
+              >
+                Overview
+              </button>
+              <button
+                type="button"
+                onClick={() => setDashboardSubView('audit')}
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                  dashboardSubView === 'audit'
+                    ? 'bg-blue-600 text-white'
+                    : 'text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white'
+                }`}
+              >
+                <ShieldAlert className="w-3.5 h-3.5" />
+                <span>Admin Audit Log</span>
+                <span
+                  className={`px-1.5 py-0.5 rounded text-[10px] font-mono tabular-nums ${
+                    dashboardSubView === 'audit'
+                      ? 'bg-white/20 text-white'
+                      : 'bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300'
+                  }`}
+                >
+                  {auditLogs.length}
+                </span>
+              </button>
+            </div>
             {games.length === 0 && (
               <button
                 type="button"
@@ -204,6 +331,156 @@ export function DashboardView({
           </div>
         )}
       </div>
+
+      {isAdmin && dashboardSubView === 'audit' ? (
+        <section className="bg-white dark:bg-[#131822] border border-slate-200 dark:border-slate-800 rounded-xl overflow-hidden shadow-xs dark:shadow-none">
+          <div className="flex flex-wrap items-center justify-between gap-4 px-5 py-4 border-b border-slate-200 dark:border-slate-800">
+            <div>
+              <div className="flex items-center gap-2">
+                <ShieldAlert className="w-4 h-4 text-blue-600 dark:text-blue-400" />
+                <h2 className="text-base font-semibold text-slate-900 dark:text-white">
+                  Admin Audit Log
+                </h2>
+              </div>
+              <p className="text-xs text-slate-600 dark:text-slate-400 mt-0.5">
+                High-impact administrative catalog actions queried from Firestore (Game Published, Game Updated, Game Deleted, Catalog Seeded).
+              </p>
+            </div>
+
+            <div className="flex items-center gap-1 p-1 rounded-lg bg-slate-100 dark:bg-[#0B0E14] border border-slate-200 dark:border-slate-800 overflow-x-auto">
+              {(
+                [
+                  { id: 'all', label: 'All Actions' },
+                  { id: 'game_publish', label: 'Game Published' },
+                  { id: 'game_update', label: 'Game Updated' },
+                  { id: 'game_delete', label: 'Game Deleted' },
+                  { id: 'catalog_seed', label: 'Catalog Seeded' },
+                ] as const
+              ).map((tab) => (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => {
+                    setAuditFilter(tab.id);
+                    setAuditPage(1);
+                  }}
+                  className={`px-3 py-1 rounded-md text-xs font-medium whitespace-nowrap transition-colors ${
+                    auditFilter === tab.id
+                      ? 'bg-blue-600 text-white'
+                      : 'text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200'
+                  }`}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {auditLoading ? (
+            <div className="p-8 text-center text-sm text-slate-600 dark:text-slate-400">
+              Loading admin audit logs...
+            </div>
+          ) : filteredAuditLogs.length === 0 ? (
+            <div className="p-8 text-center text-sm text-slate-600 dark:text-slate-400">
+              No high-impact admin actions recorded for this filter yet.
+            </div>
+          ) : (
+            <>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse">
+                  <thead>
+                    <tr className="border-b border-slate-200 dark:border-slate-800 text-xs text-slate-600 dark:text-slate-400">
+                      <th className="py-3 px-5 font-medium">Action</th>
+                      <th className="py-3 px-4 font-medium">Admin</th>
+                      <th className="py-3 px-4 font-medium">Target Game</th>
+                      <th className="py-3 px-4 font-medium">Detail</th>
+                      <th className="py-3 px-5 font-medium text-right">Timestamp</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-200 dark:divide-slate-800/70 text-sm">
+                    {paginatedAuditLogs.map((log) => (
+                      <tr
+                        key={log.id}
+                        className="hover:bg-slate-50 dark:hover:bg-slate-800/30 transition-colors"
+                      >
+                        <td className="py-3 px-5 whitespace-nowrap">
+                          <span
+                            className={`inline-flex items-center px-2.5 py-0.5 rounded-md border text-xs font-medium ${getAuditActionBadgeStyle(
+                              log.actionType
+                            )}`}
+                          >
+                            {ACTION_LABELS[log.actionType] || log.actionType}
+                          </span>
+                        </td>
+                        <td className="py-3 px-4 text-slate-800 dark:text-slate-200 font-medium whitespace-nowrap">
+                          {log.userName}
+                        </td>
+                        <td className="py-3 px-4 whitespace-nowrap">
+                          <div className="text-slate-900 dark:text-white font-medium">
+                            {log.gameTitle}
+                          </div>
+                          <div className="text-[11px] font-mono text-slate-500">
+                            {log.gameId}
+                          </div>
+                        </td>
+                        <td className="py-3 px-4 text-slate-600 dark:text-slate-400 text-xs max-w-[320px] truncate">
+                          {log.detail}
+                        </td>
+                        <td className="py-3 px-5 text-right font-mono text-xs tabular-nums text-slate-600 dark:text-slate-400 whitespace-nowrap">
+                          {formatDate(log.createdAt)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-3 border-t border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-[#0B0E14]/60 text-xs">
+                <span className="text-slate-600 dark:text-slate-400 font-mono tabular-nums">
+                  Showing {auditStartIndex + 1}–
+                  {Math.min(auditStartIndex + AUDIT_PAGE_SIZE, filteredAuditLogs.length)} of{' '}
+                  {filteredAuditLogs.length}
+                </span>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setAuditPage((prev) =>
+                        Math.max(1, Math.min(prev, totalAuditPages) - 1)
+                      )
+                    }
+                    disabled={currentAuditPage <= 1}
+                    aria-label="Previous audit page"
+                    className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-[#131822] text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                  >
+                    <ChevronLeft className="w-3.5 h-3.5" />
+                    <span>Prev</span>
+                  </button>
+
+                  <span className="px-2 font-mono tabular-nums text-slate-700 dark:text-slate-300">
+                    {currentAuditPage} / {totalAuditPages}
+                  </span>
+
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setAuditPage((prev) => Math.min(totalAuditPages, prev + 1))
+                    }
+                    disabled={currentAuditPage >= totalAuditPages}
+                    aria-label="Next audit page"
+                    className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-[#131822] text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                  >
+                    <span>Next</span>
+                    <ChevronRight className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+            </>
+          )}
+        </section>
+      ) : (
+        <>
 
       {/* Tabular KPI Row */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
@@ -616,6 +893,8 @@ export function DashboardView({
           </table>
         </div>
       </section>
+        </>
+      )}
     </div>
   );
 }

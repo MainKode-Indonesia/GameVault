@@ -13,6 +13,7 @@ import {
   where,
 } from 'firebase/firestore';
 import {
+  Activity,
   Bell,
   Bookmark,
   BookmarkCheck,
@@ -20,14 +21,13 @@ import {
   Download,
   ExternalLink,
   MessageSquare,
+  RefreshCw,
   Share2,
-  ShieldCheck,
   Star,
   Trash2,
   X,
 } from 'lucide-react';
 import {
-  auth,
   db,
   handleFirestoreError,
   OperationType,
@@ -40,14 +40,17 @@ import {
   type DownloadMirror,
   type GameItem,
   type GameReview,
+  type MirrorHealthStatus,
   type MirrorValidationResult,
 } from '../types/game';
 import { SafeImage } from './SafeImage';
 import { GameCommentsSection } from './GameCommentsSection';
+import { GameRatingDistribution } from './GameRatingDistribution';
 import { useToast } from './ToastProvider';
 
 interface GameDetailModalProps {
   game: GameItem;
+  periodicMirrorHealth?: Record<string, MirrorValidationResult>;
   user: User | null;
   userAvatarUrl?: string;
   userDisplayName?: string;
@@ -118,6 +121,7 @@ function ReviewUserAvatar({
 
 export function GameDetailModal({
   game,
+  periodicMirrorHealth,
   user,
   userAvatarUrl,
   userDisplayName,
@@ -160,11 +164,56 @@ export function GameDetailModal({
     adminUpdateAgeMs >= 0 &&
     adminUpdateAgeMs <= ADMIN_UPDATE_WINDOW_MS;
 
+  const mirrorUrlsKey = useMemo(
+    () => game.downloadLinks.map((m) => m.url).join('|'),
+    [game.downloadLinks]
+  );
+
   useEffect(() => {
     setActiveShotIndex(0);
     setShareStatus('idle');
     setWhatsNewDismissed(false);
+    setMirrorStatusMap({});
   }, [game.id, adminUpdatedMs]);
+
+  useEffect(() => {
+    const urls = game.downloadLinks.map((m) => m.url).filter(Boolean);
+    if (urls.length === 0) return;
+
+    const controller = new AbortController();
+    let cancelled = false;
+    setVerifyingMirrors(true);
+
+    void fetch('/api/mirrors/health', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ urls }),
+      signal: controller.signal,
+    })
+      .then(async (res) => {
+        if (!res.ok) return null;
+        return (await res.json()) as { results?: MirrorValidationResult[] };
+      })
+      .then((data) => {
+        if (cancelled || !data?.results) return;
+        const nextMap: Record<string, MirrorValidationResult> = {};
+        data.results.forEach((item) => {
+          nextMap[item.url] = item;
+        });
+        setMirrorStatusMap(nextMap);
+      })
+      .catch(() => {
+        // Silent background fallback: stored mirror.healthStatus remains visible if present
+      })
+      .finally(() => {
+        if (!cancelled) setVerifyingMirrors(false);
+      });
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [game.id, mirrorUrlsKey]);
 
   useEffect(() => {
     if (!isRecentlyUpdatedByAdmin) return;
@@ -342,43 +391,81 @@ export function GameDetailModal({
   };
 
   const handleVerifyMirrors = async () => {
-    if (!user) {
-      onRequireAuth();
-      return;
-    }
+    const urls = game.downloadLinks.map((m) => m.url).filter(Boolean);
+    if (urls.length === 0) return;
     setVerifyingMirrors(true);
     try {
-      const token = await auth.currentUser?.getIdToken();
-      if (!token) return;
-      const response = await fetch('/api/mirrors/validate', {
+      const response = await fetch('/api/mirrors/health', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
-          urls: game.downloadLinks.map((m) => m.url),
+          urls,
+          forceRefresh: true,
         }),
       });
       const data = (await response.json()) as { results?: MirrorValidationResult[] };
       if (response.ok && data.results) {
         const nextMap: Record<string, MirrorValidationResult> = {};
-        let validCount = 0;
+        let onlineCount = 0;
+        let degradedCount = 0;
+        let offlineCount = 0;
         data.results.forEach((item) => {
           nextMap[item.url] = item;
-          if (item.valid) validCount += 1;
+          if (item.health === 'online') onlineCount += 1;
+          else if (item.health === 'degraded') degradedCount += 1;
+          else offlineCount += 1;
         });
         setMirrorStatusMap(nextMap);
+        const summaryParts = [
+          onlineCount > 0 ? `${onlineCount} Online` : '',
+          degradedCount > 0 ? `${degradedCount} Degraded` : '',
+          offlineCount > 0 ? `${offlineCount} Offline` : '',
+        ].filter(Boolean);
         showToast({
-          title: 'Mirror verification complete',
-          description: `${validCount} of ${data.results.length} mirrors validated.`,
-          variant: validCount === data.results.length ? 'success' : 'info',
+          title: 'Mirror health check complete',
+          description: summaryParts.join(' · ') || `${data.results.length} mirrors checked.`,
+          variant: offlineCount > 0 ? 'error' : degradedCount > 0 ? 'info' : 'success',
         });
       }
+    } catch {
+      showToast({
+        title: 'Health check unavailable',
+        description: 'Could not reach the mirror health endpoint.',
+        variant: 'error',
+      });
     } finally {
       setVerifyingMirrors(false);
     }
   };
+
+  const resolvedMirrorStatusMap = useMemo(() => {
+    const merged: Record<string, MirrorValidationResult> = {};
+    if (periodicMirrorHealth) {
+      for (const [url, info] of Object.entries(periodicMirrorHealth)) {
+        merged[url] = info;
+      }
+    }
+    for (const [url, info] of Object.entries(mirrorStatusMap)) {
+      merged[url] = info;
+    }
+    return merged;
+  }, [periodicMirrorHealth, mirrorStatusMap]);
+
+  const mirrorHealthSummary = useMemo(() => {
+    let online = 0;
+    let degraded = 0;
+    let offline = 0;
+    for (const mirror of game.downloadLinks) {
+      const health: MirrorHealthStatus | undefined =
+        resolvedMirrorStatusMap[mirror.url]?.health ?? mirror.healthStatus;
+      if (health === 'online') online += 1;
+      else if (health === 'degraded') degraded += 1;
+      else if (health === 'offline') offline += 1;
+    }
+    return { online, degraded, offline };
+  }, [game.downloadLinks, resolvedMirrorStatusMap]);
 
   const handleSubmitReview = async (e: FormEvent) => {
     e.preventDefault();
@@ -779,21 +866,52 @@ export function GameDetailModal({
           <section className="pt-6 border-t border-slate-200 dark:border-slate-800 space-y-4">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
-                <h3 className="text-lg font-semibold text-slate-900 dark:text-white">
-                  Download Mirrors ({game.downloadLinks.length})
-                </h3>
+                <div className="flex flex-wrap items-center gap-2.5">
+                  <h3 className="text-lg font-semibold text-slate-900 dark:text-white">
+                    Download Mirrors ({game.downloadLinks.length})
+                  </h3>
+                  {(mirrorHealthSummary.online > 0 ||
+                    mirrorHealthSummary.degraded > 0 ||
+                    mirrorHealthSummary.offline > 0) && (
+                    <span className="inline-flex items-center gap-2 text-xs text-slate-600 dark:text-slate-400">
+                      <Activity className="w-3.5 h-3.5 text-slate-400" />
+                      {mirrorHealthSummary.online > 0 && (
+                        <span className="inline-flex items-center gap-1 text-emerald-700 dark:text-emerald-400 font-medium">
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                          {mirrorHealthSummary.online} Online
+                        </span>
+                      )}
+                      {mirrorHealthSummary.degraded > 0 && (
+                        <span className="inline-flex items-center gap-1 text-amber-700 dark:text-amber-400 font-medium">
+                          <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
+                          {mirrorHealthSummary.degraded} Degraded
+                        </span>
+                      )}
+                      {mirrorHealthSummary.offline > 0 && (
+                        <span className="inline-flex items-center gap-1 text-red-700 dark:text-red-400 font-medium">
+                          <span className="w-1.5 h-1.5 rounded-full bg-red-500" />
+                          {mirrorHealthSummary.offline} Offline
+                        </span>
+                      )}
+                    </span>
+                  )}
+                </div>
                 <p className="text-xs text-slate-600 dark:text-slate-400 mt-0.5">
-                  Select a redundant mirror source below. Signed-in downloads are tracked in your dashboard.
+                  Live mirror health indicators ping sources automatically. Signed-in downloads are tracked in your dashboard.
                 </p>
               </div>
               <button
                 type="button"
                 onClick={handleVerifyMirrors}
                 disabled={verifyingMirrors}
-                className="inline-flex items-center gap-2 px-3.5 py-2 rounded-lg bg-slate-100 hover:bg-slate-200 border border-slate-200 text-xs font-medium text-slate-800 dark:bg-[#171E2C] dark:hover:bg-[#1E2738] dark:border-slate-700 dark:text-slate-200 transition-colors"
+                className="inline-flex items-center gap-2 px-3.5 py-2 rounded-lg bg-slate-100 hover:bg-slate-200 border border-slate-200 text-xs font-medium text-slate-800 dark:bg-[#171E2C] dark:hover:bg-[#1E2738] dark:border-slate-700 dark:text-slate-200 disabled:opacity-60 transition-colors"
               >
-                <ShieldCheck className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
-                <span>{verifyingMirrors ? 'Checking Mirrors...' : 'Verify Mirror Links'}</span>
+                <RefreshCw
+                  className={`w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400 ${
+                    verifyingMirrors ? 'animate-spin' : ''
+                  }`}
+                />
+                <span>{verifyingMirrors ? 'Checking Health...' : 'Check Mirror Health'}</span>
               </button>
             </div>
 
@@ -805,32 +923,79 @@ export function GameDetailModal({
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               {game.downloadLinks.map((mirror, idx) => {
-                const statusInfo = mirrorStatusMap[mirror.url];
+                const statusInfo = resolvedMirrorStatusMap[mirror.url];
+                const resolvedHealth: MirrorHealthStatus | 'checking' =
+                  statusInfo?.health ??
+                  mirror.healthStatus ??
+                  (verifyingMirrors ? 'checking' : 'degraded');
                 const safeHref = isSafeHttpOrAssetUrl(mirror.url) ? mirror.url : '#';
+
+                const healthConfig =
+                  resolvedHealth === 'online'
+                    ? {
+                        label: 'Online',
+                        dotClass: 'bg-emerald-500',
+                        badgeClass:
+                          'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/25',
+                      }
+                    : resolvedHealth === 'degraded'
+                      ? {
+                          label: 'Degraded',
+                          dotClass: 'bg-amber-500',
+                          badgeClass:
+                            'bg-amber-500/10 text-amber-700 dark:text-amber-300 border-amber-500/25',
+                        }
+                      : resolvedHealth === 'offline'
+                        ? {
+                            label: 'Offline',
+                            dotClass: 'bg-red-500',
+                            badgeClass:
+                              'bg-red-500/10 text-red-700 dark:text-red-300 border-red-500/25',
+                          }
+                        : {
+                            label: 'Pinging...',
+                            dotClass: 'bg-slate-400 animate-pulse',
+                            badgeClass:
+                              'bg-slate-200/70 dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-slate-300 dark:border-slate-700',
+                          };
+
+                const healthTooltip =
+                  statusInfo?.reason ||
+                  (statusInfo?.statusCode
+                    ? `HTTP ${statusInfo.statusCode}${
+                        typeof statusInfo.latencyMs === 'number'
+                          ? ` · ${statusInfo.latencyMs} ms`
+                          : ''
+                      }`
+                    : mirror.healthStatus
+                      ? `Stored mirror status: ${mirror.healthStatus}`
+                      : 'Live mirror probe');
+
                 return (
                   <div
                     key={`${mirror.provider}-${idx}`}
                     className="flex items-center justify-between gap-4 p-4 rounded-lg bg-slate-50 dark:bg-[#0B0E14] border border-slate-200 hover:border-slate-300 dark:border-slate-800 dark:hover:border-slate-700 transition-colors"
                   >
-                    <div className="min-w-0 space-y-1">
-                      <div className="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
-                        <span className="font-medium text-slate-800 dark:text-slate-200">{mirror.provider}</span>
+                    <div className="min-w-0 space-y-1.5">
+                      <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+                        <span className="font-medium text-slate-800 dark:text-slate-200">
+                          {mirror.provider}
+                        </span>
                         <span aria-hidden="true">·</span>
                         <span>{mirror.partInfo || 'Full Build'}</span>
-                        {statusInfo && (
-                          <>
-                            <span aria-hidden="true">·</span>
-                            <span
-                              className={
-                                statusInfo.valid
-                                  ? 'text-emerald-600 dark:text-emerald-400'
-                                  : 'text-red-600 dark:text-red-400'
-                              }
-                            >
-                              {statusInfo.valid ? 'Verified' : 'Invalid'}
-                            </span>
-                          </>
-                        )}
+                        <span
+                          title={healthTooltip}
+                          className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md border text-[11px] font-medium ${healthConfig.badgeClass}`}
+                        >
+                          <span className={`w-1.5 h-1.5 rounded-full ${healthConfig.dotClass}`} />
+                          <span>Health: {healthConfig.label}</span>
+                          {typeof statusInfo?.latencyMs === 'number' &&
+                            resolvedHealth === 'online' && (
+                              <span className="font-mono text-[10px] opacity-80">
+                                {statusInfo.latencyMs}ms
+                              </span>
+                            )}
+                        </span>
                       </div>
                       <div className="text-sm font-medium text-slate-900 dark:text-white truncate">
                         {mirror.label}
@@ -866,53 +1031,11 @@ export function GameDetailModal({
             </div>
 
             {/* Dynamic Average Rating Breakdown */}
-            <div className="grid grid-cols-1 md:grid-cols-12 gap-6 p-5 rounded-xl bg-slate-50 dark:bg-[#0B0E14] border border-slate-200 dark:border-slate-800 items-center">
-              <div className="md:col-span-4 text-center md:border-r md:border-slate-200 dark:md:border-slate-800 md:pr-6 space-y-1.5">
-                <div className="text-4xl font-bold font-mono tabular-nums text-slate-900 dark:text-white">
-                  {totalReviews > 0 ? game.rating.toFixed(1) : '0.0'}
-                </div>
-                <div className="flex items-center justify-center gap-1">
-                  {[1, 2, 3, 4, 5].map((star) => (
-                    <Star
-                      key={star}
-                      className={`w-4 h-4 ${
-                        star <= Math.round(game.rating)
-                          ? 'fill-amber-500 text-amber-500 dark:fill-amber-400 dark:text-amber-400'
-                          : 'text-slate-300 dark:text-slate-700'
-                      }`}
-                    />
-                  ))}
-                </div>
-                <div className="text-xs text-slate-600 dark:text-slate-400 font-mono tabular-nums">
-                  {totalReviews === 0
-                    ? 'No player ratings yet'
-                    : `Based on ${totalReviews} ${totalReviews === 1 ? 'review' : 'reviews'}`}
-                </div>
-              </div>
-
-              <div className="md:col-span-8 space-y-2">
-                {[5, 4, 3, 2, 1].map((star) => {
-                  const count = starDistribution[star] || 0;
-                  const pct = reviews.length > 0 ? (count / reviews.length) * 100 : 0;
-                  return (
-                    <div key={star} className="flex items-center gap-3 text-xs">
-                      <span className="w-8 font-mono tabular-nums text-slate-700 dark:text-slate-300 text-right">
-                        {star} ★
-                      </span>
-                      <div className="flex-1 h-2 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden">
-                        <div
-                          className="h-full bg-amber-500 dark:bg-amber-400 rounded-full transition-all duration-300"
-                          style={{ width: `${pct}%` }}
-                        />
-                      </div>
-                      <span className="w-8 font-mono tabular-nums text-slate-600 dark:text-slate-400">
-                        {count}
-                      </span>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
+            <GameRatingDistribution
+              averageRating={game.rating}
+              totalReviews={totalReviews}
+              starDistribution={starDistribution}
+            />
 
             {user ? (
               <form

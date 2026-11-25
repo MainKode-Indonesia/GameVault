@@ -34,11 +34,14 @@ export const SUGGESTED_GAME_TAGS: string[] = [
   'Time Attack',
 ];
 
+export type MirrorHealthStatus = 'online' | 'degraded' | 'offline';
+
 export interface DownloadMirror {
   label: string;
   provider: string;
   url: string;
   partInfo: string;
+  healthStatus?: MirrorHealthStatus;
 }
 
 export interface GameItem {
@@ -108,7 +111,17 @@ export type ActivityActionType =
   | 'wishlist_remove'
   | 'download'
   | 'comment'
-  | 'game_publish';
+  | 'game_publish'
+  | 'game_update'
+  | 'game_delete'
+  | 'catalog_seed';
+
+export const ADMIN_AUDIT_ACTION_TYPES: ActivityActionType[] = [
+  'game_publish',
+  'game_update',
+  'game_delete',
+  'catalog_seed',
+];
 
 export interface ActivityLog {
   id: string;
@@ -144,6 +157,8 @@ export interface MirrorValidationResult {
   valid: boolean;
   provider: string;
   status: 'reachable' | 'format-ok' | 'blocked' | 'invalid';
+  health: MirrorHealthStatus;
+  latencyMs?: number;
   statusCode?: number;
   reason?: string;
 }
