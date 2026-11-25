@@ -24,6 +24,8 @@ import {
   Bookmark,
   BookmarkCheck,
   Download,
+  FileDown,
+  Flame,
   Layers,
   Plus,
   Scale,
@@ -48,12 +50,17 @@ import {
   saveWishlistToCache,
 } from './lib/wishlistCache';
 import {
+  exportCatalogToJson,
+  exportWishlistToJson,
+} from './lib/exportUtils';
+import {
   GAME_GENRES,
   resolveBannerCover,
   resolveVerticalCover,
   type ActivityLog,
   type GameGenre,
   type GameItem,
+  type MirrorReport,
   type MirrorValidationResult,
   type UserProfile,
   type WishlistItem,
@@ -97,13 +104,21 @@ export default function App() {
   const [gamesLoading, setGamesLoading] = useState(true);
   const [wishlist, setWishlist] = useState<WishlistItem[]>([]);
   const [activities, setActivities] = useState<ActivityLog[]>([]);
+  const [mirrorReports, setMirrorReports] = useState<MirrorReport[]>([]);
 
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedGenre, setSelectedGenre] = useState<'All' | GameGenre>('All');
+  const [onlyPopular, setOnlyPopular] = useState(false);
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
   const [sortBy, setSortBy] = useState<SortOption>('rating');
 
-  const [selectedGameId, setSelectedGameId] = useState<string | null>(null);
+  const [selectedGameId, setSelectedGameId] = useState<string | null>(() => {
+    try {
+      return new URLSearchParams(window.location.search).get('game') || null;
+    } catch {
+      return null;
+    }
+  });
   const [compareGameIds, setCompareGameIds] = useState<string[]>([]);
   const [compareModalOpen, setCompareModalOpen] = useState(false);
   const [theme, setTheme] = useState<ThemeMode>(() => {
@@ -127,6 +142,8 @@ export default function App() {
   const autoSeededRef = useRef(false);
   const justSignedInRef = useRef(false);
   const mirrorCheckTickRef = useRef(0);
+  const seenReportIdsRef = useRef<Set<string>>(new Set());
+  const initialReportsSyncedRef = useRef(false);
   const { showToast } = useToast();
 
   useEffect(() => {
@@ -139,6 +156,20 @@ export default function App() {
       window.removeEventListener('offline', handleOffline);
     };
   }, []);
+
+  useEffect(() => {
+    try {
+      const url = new URL(window.location.href);
+      if (selectedGameId) {
+        url.searchParams.set('game', selectedGameId);
+      } else {
+        url.searchParams.delete('game');
+      }
+      window.history.replaceState({}, '', url.toString());
+    } catch {
+      // Ignore history API restrictions
+    }
+  }, [selectedGameId]);
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', theme === 'dark');
@@ -440,6 +471,60 @@ export default function App() {
 
     return () => unsubscribe();
   }, [authReady, user, isAdmin]);
+
+  // Subscribe to open dead-mirror reports so Issue Reported status & admin alerts sync in real time
+  useEffect(() => {
+    if (!authReady) return;
+    const reportsQuery = query(
+      collection(db, 'mirrorReports'),
+      where('status', '==', 'open'),
+      limit(100)
+    );
+
+    const unsubscribe = onSnapshot(
+      reportsQuery,
+      (snapshot) => {
+        const list: MirrorReport[] = snapshot.docs.map((d) => ({
+          id: d.id,
+          ...(d.data() as Omit<MirrorReport, 'id'>),
+        }));
+        list.sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
+        setMirrorReports(list);
+
+        if (isAdmin) {
+          const newReports = list.filter((r) => !seenReportIdsRef.current.has(r.id));
+          if (!initialReportsSyncedRef.current) {
+            initialReportsSyncedRef.current = true;
+            if (list.length > 0) {
+              showToast({
+                title: `${list.length} open dead mirror ${list.length === 1 ? 'report' : 'reports'}`,
+                description: 'Review reported mirrors in the Dashboard.',
+                variant: 'info',
+                durationMs: 6000,
+              });
+            }
+          } else if (newReports.length > 0) {
+            const latest = newReports[0];
+            showToast({
+              title: 'Dead mirror reported',
+              description: `${latest.gameTitle} · ${latest.mirrorProvider} (${latest.mirrorLabel})`,
+              variant: 'error',
+              durationMs: 7000,
+            });
+          }
+          seenReportIdsRef.current = new Set(list.map((r) => r.id));
+        } else {
+          initialReportsSyncedRef.current = false;
+          seenReportIdsRef.current = new Set();
+        }
+      },
+      (error) => {
+        handleFirestoreError(error, OperationType.LIST, 'mirrorReports');
+      }
+    );
+
+    return () => unsubscribe();
+  }, [authReady, isAdmin, showToast]);
 
   const handleSignIn = async () => {
     setAuthLoading(true);
@@ -860,6 +945,48 @@ export default function App() {
     }
   };
 
+  const handleResolveMirrorReport = async (report: MirrorReport) => {
+    if (!user || !isAdmin) return;
+    const reportPath = `mirrorReports/${report.id}`;
+    try {
+      await updateDoc(doc(db, 'mirrorReports', report.id), {
+        status: 'resolved',
+        resolvedAt: serverTimestamp(),
+        resolvedBy: user.uid,
+      });
+
+      const targetGame = games.find((g) => g.id === report.gameId);
+      if (targetGame) {
+        const hasFlaggedMirror = (targetGame.downloadLinks ?? []).some(
+          (m) =>
+            m.url.trim() === report.mirrorUrl.trim() &&
+            m.healthStatus === 'issue_reported'
+        );
+        if (hasFlaggedMirror) {
+          const updatedLinks = targetGame.downloadLinks.map((m) => {
+            if (m.url.trim() !== report.mirrorUrl.trim() || m.healthStatus !== 'issue_reported') {
+              return m;
+            }
+            const { healthStatus: _cleared, ...rest } = m;
+            return rest;
+          });
+          await updateDoc(doc(db, 'games', targetGame.id), {
+            downloadLinks: updatedLinks,
+            updatedAt: serverTimestamp(),
+          });
+        }
+      }
+
+      showToast({
+        title: 'Mirror report resolved',
+        description: `${report.gameTitle} · ${report.mirrorProvider} cleared from reported queue.`,
+        variant: 'success',
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, reportPath);
+    }
+  };
+
   const publicGames = useMemo(
     () => games.filter((g) => g.visibility === 'public'),
     [games]
@@ -876,6 +1003,16 @@ export default function App() {
     }));
   }, [publicGames, gamesLoading]);
 
+  const openReportedMirrorKeys = useMemo(() => {
+    const keys = new Set<string>();
+    for (const report of mirrorReports) {
+      if (report.status === 'open' && report.gameId && report.mirrorUrl) {
+        keys.add(`${report.gameId}::${report.mirrorUrl.trim()}`);
+      }
+    }
+    return keys;
+  }, [mirrorReports]);
+
   // Periodically simulate & refresh mirror health status across every game's downloadLinks
   useEffect(() => {
     const sourceGames = games.length > 0 ? games : baseGames;
@@ -888,7 +1025,13 @@ export default function App() {
       for (const game of sourceGames) {
         for (const mirror of game.downloadLinks ?? []) {
           if (mirror.url) {
-            nextMap[mirror.url] = checkMirrorHealth(mirror, tick);
+            const isReported = openReportedMirrorKeys.has(
+              `${game.id}::${mirror.url.trim()}`
+            );
+            nextMap[mirror.url] = checkMirrorHealth(
+              isReported ? { ...mirror, healthStatus: 'issue_reported' } : mirror,
+              tick
+            );
           }
         }
       }
@@ -898,19 +1041,22 @@ export default function App() {
     runHealthCheck();
     const intervalId = window.setInterval(runHealthCheck, 15_000);
     return () => window.clearInterval(intervalId);
-  }, [games, baseGames]);
+  }, [games, baseGames, openReportedMirrorKeys]);
 
   const displayGames = useMemo<GameItem[]>(() => {
     return baseGames.map((game) => ({
       ...game,
       downloadLinks: (game.downloadLinks ?? []).map((mirror) => {
+        if (openReportedMirrorKeys.has(`${game.id}::${mirror.url.trim()}`)) {
+          return { ...mirror, healthStatus: 'issue_reported' };
+        }
         const checked = mirrorHealthMap[mirror.url];
         return checked
           ? { ...mirror, healthStatus: checked.health }
           : mirror;
       }),
     }));
-  }, [baseGames, mirrorHealthMap]);
+  }, [baseGames, mirrorHealthMap, openReportedMirrorKeys]);
 
   const featuredGame = useMemo(() => {
     return (
@@ -936,9 +1082,15 @@ export default function App() {
     );
   };
 
+  const popularCount = useMemo(
+    () => displayGames.filter((g) => (g.downloadsCount ?? 0) > 1000).length,
+    [displayGames]
+  );
+
   const filteredGames = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     const result = displayGames.filter((game) => {
+      if (onlyPopular && (game.downloadsCount ?? 0) <= 1000) return false;
       const matchesGenre = selectedGenre === 'All' || game.genre === selectedGenre;
       if (!matchesGenre) return false;
       const gameTags = game.tags ?? [];
@@ -969,7 +1121,41 @@ export default function App() {
     });
 
     return result;
-  }, [displayGames, searchQuery, selectedGenre, selectedTags, sortBy]);
+  }, [displayGames, searchQuery, selectedGenre, onlyPopular, selectedTags, sortBy]);
+
+  const handleExportCatalog = (targetGames: GameItem[] = filteredGames) => {
+    if (targetGames.length === 0) {
+      showToast({
+        title: 'Nothing to export',
+        description: 'No games match the current catalog view.',
+        variant: 'info',
+      });
+      return;
+    }
+    const filename = exportCatalogToJson(targetGames);
+    showToast({
+      title: 'Catalog backup exported',
+      description: `Saved ${targetGames.length} ${targetGames.length === 1 ? 'game' : 'games'} to ${filename}.`,
+      variant: 'success',
+    });
+  };
+
+  const handleExportWishlist = () => {
+    if (wishlist.length === 0) {
+      showToast({
+        title: 'Wishlist is empty',
+        description: 'Save games to your wishlist before exporting a backup.',
+        variant: 'info',
+      });
+      return;
+    }
+    const filename = exportWishlistToJson(wishlist);
+    showToast({
+      title: 'Wishlist backup exported',
+      description: `Saved ${wishlist.length} ${wishlist.length === 1 ? 'item' : 'items'} to ${filename}.`,
+      variant: 'success',
+    });
+  };
 
   const selectedGame = useMemo(() => {
     const found =
@@ -980,13 +1166,16 @@ export default function App() {
     return {
       ...found,
       downloadLinks: (found.downloadLinks ?? []).map((mirror) => {
+        if (openReportedMirrorKeys.has(`${found.id}::${mirror.url.trim()}`)) {
+          return { ...mirror, healthStatus: 'issue_reported' as const };
+        }
         const checked = mirrorHealthMap[mirror.url];
         return checked
           ? { ...mirror, healthStatus: checked.health }
           : mirror;
       }),
     };
-  }, [games, displayGames, selectedGameId, mirrorHealthMap]);
+  }, [games, displayGames, selectedGameId, mirrorHealthMap, openReportedMirrorKeys]);
 
   const wishlistGameIds = useMemo(
     () => new Set(wishlist.map((w) => w.gameId)),
@@ -1364,6 +1553,17 @@ export default function App() {
                     <option value="newest">Newest Year</option>
                   </select>
 
+                  <button
+                    type="button"
+                    onClick={() => handleExportCatalog(filteredGames)}
+                    disabled={filteredGames.length === 0}
+                    title="Export current catalog to JSON backup"
+                    className="inline-flex items-center gap-1.5 px-3.5 py-2.5 rounded-lg bg-white hover:bg-slate-100 border border-slate-200 text-slate-700 dark:bg-[#131822] dark:hover:bg-slate-800 dark:border-slate-800 dark:text-slate-200 disabled:opacity-40 text-sm font-medium whitespace-nowrap transition-colors"
+                  >
+                    <FileDown className="w-4 h-4 text-blue-600 dark:text-blue-400" />
+                    <span>Export JSON</span>
+                  </button>
+
                   {isAdmin && (
                     <button
                       type="button"
@@ -1380,9 +1580,51 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Genre Segmented Tabs */}
+              {/* Genre & Popular Filter Tabs */}
               <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
-                {(['All', ...GAME_GENRES] as const).map((genre) => {
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedGenre('All');
+                    setOnlyPopular(false);
+                  }}
+                  className={`px-3.5 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap shrink-0 transition-colors ${
+                    selectedGenre === 'All' && !onlyPopular
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-white text-slate-600 hover:text-slate-900 border border-slate-200 dark:bg-[#131822] dark:text-slate-400 dark:hover:text-slate-100 dark:border-slate-800'
+                  }`}
+                >
+                  All
+                </button>
+
+                <button
+                  type="button"
+                  aria-pressed={onlyPopular}
+                  onClick={() => setOnlyPopular((prev) => !prev)}
+                  title="Filter popular titles (> 1,000 downloads)"
+                  className={`inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap shrink-0 transition-colors ${
+                    onlyPopular
+                      ? 'bg-amber-500 text-white border border-amber-500 dark:bg-amber-500 dark:text-slate-950'
+                      : 'bg-white text-slate-700 hover:text-slate-900 border border-slate-200 dark:bg-[#131822] dark:text-amber-300 dark:hover:text-amber-200 dark:border-slate-800'
+                  }`}
+                >
+                  <Flame className="w-3.5 h-3.5" />
+                  <span>Popular</span>
+                  <span
+                    className={`font-mono text-[11px] tabular-nums ${
+                      onlyPopular ? 'opacity-90' : 'text-slate-500 dark:text-slate-400'
+                    }`}
+                  >
+                    ({popularCount})
+                  </span>
+                </button>
+
+                <span
+                  aria-hidden="true"
+                  className="h-5 w-px bg-slate-200 dark:bg-slate-800 mx-1 shrink-0"
+                />
+
+                {GAME_GENRES.map((genre) => {
                   const active = selectedGenre === genre;
                   return (
                     <button
@@ -1521,6 +1763,7 @@ export default function App() {
                       onClick={() => {
                         setSearchQuery('');
                         setSelectedGenre('All');
+                        setOnlyPopular(false);
                         setSelectedTags([]);
                       }}
                       className="px-4 py-2 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-800 dark:bg-slate-800 dark:hover:bg-slate-700 dark:text-slate-200 text-xs font-medium transition-colors"
@@ -1551,11 +1794,23 @@ export default function App() {
                   </span>
                 )}
               </div>
-              {(user || wishlist.length > 0) && (
-                <span className="text-sm font-mono tabular-nums text-slate-600 dark:text-slate-400">
-                  {wishlist.length}
-                </span>
-              )}
+              <div className="flex items-center gap-3">
+                {wishlist.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={handleExportWishlist}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white hover:bg-slate-100 border border-slate-200 text-slate-700 dark:bg-[#131822] dark:hover:bg-slate-800 dark:border-slate-800 dark:text-slate-200 text-xs font-medium transition-colors"
+                  >
+                    <FileDown className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+                    <span>Export JSON</span>
+                  </button>
+                )}
+                {(user || wishlist.length > 0) && (
+                  <span className="text-sm font-mono tabular-nums text-slate-600 dark:text-slate-400">
+                    {wishlist.length}
+                  </span>
+                )}
+              </div>
             </div>
 
             {!user && !(isOffline && wishlist.length > 0) ? (
@@ -1690,6 +1945,7 @@ export default function App() {
             games={games}
             wishlist={wishlist}
             activities={activities}
+            mirrorReports={mirrorReports}
             onSignIn={() => void handleSignIn()}
             onUpdateProfile={handleUpdateProfile}
             onOpenGame={(g) => setSelectedGameId(g.id)}
@@ -1702,7 +1958,10 @@ export default function App() {
               setFormModalOpen(true);
             }}
             onDeleteGame={handleDeleteGame}
+            onResolveMirrorReport={handleResolveMirrorReport}
             onSeedStarterCatalog={() => handleSeedStarterCatalog(true)}
+            onExportCatalog={() => handleExportCatalog(games.length > 0 ? games : displayGames)}
+            onExportWishlist={handleExportWishlist}
             seeding={seeding}
           />
         )}
@@ -1717,8 +1976,10 @@ export default function App() {
 
       {selectedGame && (
         <GameDetailModal
+          key={selectedGame.id}
           game={selectedGame}
           periodicMirrorHealth={mirrorHealthMap}
+          openMirrorReports={mirrorReports}
           user={user}
           userAvatarUrl={userProfile?.photoURL || user?.photoURL || ''}
           userDisplayName={userProfile?.displayName || user?.displayName || ''}

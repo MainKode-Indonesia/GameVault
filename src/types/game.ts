@@ -34,7 +34,7 @@ export const SUGGESTED_GAME_TAGS: string[] = [
   'Time Attack',
 ];
 
-export type MirrorHealthStatus = 'online' | 'degraded' | 'offline';
+export type MirrorHealthStatus = 'online' | 'degraded' | 'offline' | 'issue_reported';
 
 export interface DownloadMirror {
   label: string;
@@ -111,6 +111,7 @@ export type ActivityActionType =
   | 'wishlist_remove'
   | 'download'
   | 'comment'
+  | 'mirror_report'
   | 'game_publish'
   | 'game_update'
   | 'game_delete'
@@ -163,6 +164,24 @@ export interface MirrorValidationResult {
   reason?: string;
 }
 
+export type MirrorReportStatus = 'open' | 'resolved';
+
+export interface MirrorReport {
+  id: string;
+  gameId: string;
+  gameTitle: string;
+  mirrorUrl: string;
+  mirrorLabel: string;
+  mirrorProvider: string;
+  userId: string;
+  userName: string;
+  reason: string;
+  status: MirrorReportStatus;
+  createdAt?: unknown;
+  resolvedAt?: unknown;
+  resolvedBy?: string;
+}
+
 export const BLUEPRINT_LIMITS = {
   TITLE_MIN: 2,
   TITLE_MAX: 120,
@@ -187,6 +206,8 @@ export const BLUEPRINT_LIMITS = {
   TAGS_MAX: 10,
   TAG_MIN_LEN: 2,
   TAG_MAX_LEN: 30,
+  REPORT_REASON_MIN: 1,
+  REPORT_REASON_MAX: 300,
 };
 
 export function isSafeHttpOrAssetUrl(value: string): boolean {

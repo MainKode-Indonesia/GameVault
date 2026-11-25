@@ -100,6 +100,18 @@ export function checkMirrorHealth(
   const provider = mirror.provider || detectProviderFromHost(host);
   const sample = hashSeed(trimmedUrl, tick) % 100;
 
+  if (mirror.healthStatus === 'issue_reported') {
+    return {
+      url: trimmedUrl,
+      valid: false,
+      provider,
+      status: 'invalid',
+      health: 'issue_reported',
+      statusCode: 503,
+      reason: 'Issue reported by user — awaiting admin verification.',
+    };
+  }
+
   let health: MirrorHealthStatus = 'online';
   let latencyMs = 75 + (hashSeed(`${trimmedUrl}:lat`, tick) % 240);
   let reason: string | undefined;

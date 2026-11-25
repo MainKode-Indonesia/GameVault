@@ -281,7 +281,12 @@ export function GameFormModal({ initialGame, onClose, onSave }: GameFormModalPro
         url: m.url.trim(),
         partInfo: m.partInfo.trim().slice(0, 80) || 'Full Build',
       };
-      if (m.healthStatus === 'online' || m.healthStatus === 'degraded' || m.healthStatus === 'offline') {
+      if (
+        m.healthStatus === 'online' ||
+        m.healthStatus === 'degraded' ||
+        m.healthStatus === 'offline' ||
+        m.healthStatus === 'issue_reported'
+      ) {
         base.healthStatus = m.healthStatus;
       }
       return base;
@@ -691,6 +696,7 @@ export function GameFormModal({ initialGame, onClose, onSave }: GameFormModalPro
                         <option value="online">Health: Online</option>
                         <option value="degraded">Health: Degraded</option>
                         <option value="offline">Health: Offline</option>
+                        <option value="issue_reported">Health: Issue Reported</option>
                       </select>
                     </div>
 
@@ -726,7 +732,9 @@ export function GameFormModal({ initialGame, onClose, onSave }: GameFormModalPro
                             ? 'text-emerald-600 dark:text-emerald-400'
                             : check.health === 'degraded'
                               ? 'text-amber-600 dark:text-amber-400'
-                              : 'text-red-600 dark:text-red-400'
+                              : check.health === 'issue_reported'
+                                ? 'text-orange-600 dark:text-orange-400'
+                                : 'text-red-600 dark:text-red-400'
                         }`}
                       >
                         <span
@@ -735,7 +743,9 @@ export function GameFormModal({ initialGame, onClose, onSave }: GameFormModalPro
                               ? 'bg-emerald-500'
                               : check.health === 'degraded'
                                 ? 'bg-amber-500'
-                                : 'bg-red-500'
+                                : check.health === 'issue_reported'
+                                  ? 'bg-orange-500'
+                                  : 'bg-red-500'
                           }`}
                         />
                         <span>
@@ -745,7 +755,9 @@ export function GameFormModal({ initialGame, onClose, onSave }: GameFormModalPro
                               })`
                             : check.health === 'degraded'
                               ? `Degraded (${check.provider} · ${check.reason || check.status})`
-                              : `Offline: ${check.reason || 'Unreachable URL'}`}
+                              : check.health === 'issue_reported'
+                                ? `Issue Reported (${check.provider} · ${check.reason || 'Reported by user'})`
+                                : `Offline: ${check.reason || 'Unreachable URL'}`}
                         </span>
                       </div>
                     )}

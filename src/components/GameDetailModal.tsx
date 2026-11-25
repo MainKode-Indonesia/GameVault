@@ -20,6 +20,7 @@ import {
   Check,
   Download,
   ExternalLink,
+  Flag,
   MessageSquare,
   RefreshCw,
   Share2,
@@ -41,6 +42,7 @@ import {
   type GameItem,
   type GameReview,
   type MirrorHealthStatus,
+  type MirrorReport,
   type MirrorValidationResult,
 } from '../types/game';
 import { SafeImage } from './SafeImage';
@@ -51,6 +53,7 @@ import { useToast } from './ToastProvider';
 interface GameDetailModalProps {
   game: GameItem;
   periodicMirrorHealth?: Record<string, MirrorValidationResult>;
+  openMirrorReports?: MirrorReport[];
   user: User | null;
   userAvatarUrl?: string;
   userDisplayName?: string;
@@ -122,6 +125,7 @@ function ReviewUserAvatar({
 export function GameDetailModal({
   game,
   periodicMirrorHealth,
+  openMirrorReports = [],
   user,
   userAvatarUrl,
   userDisplayName,
@@ -144,6 +148,10 @@ export function GameDetailModal({
   const [mirrorStatusMap, setMirrorStatusMap] = useState<
     Record<string, MirrorValidationResult>
   >({});
+  const [reportingMirrorIdx, setReportingMirrorIdx] = useState<number | null>(null);
+  const [reportReason, setReportReason] = useState('Dead link / file unavailable');
+  const [submittingReport, setSubmittingReport] = useState(false);
+  const [locallyReportedUrls, setLocallyReportedUrls] = useState<string[]>([]);
   const [downloadFeedback, setDownloadFeedback] = useState<string | null>(null);
   const [shareStatus, setShareStatus] = useState<'idle' | 'copied' | 'error'>('idle');
   const [whatsNewDismissed, setWhatsNewDismissed] = useState(false);
@@ -169,11 +177,29 @@ export function GameDetailModal({
     [game.downloadLinks]
   );
 
+  const reportedUrlsForGame = useMemo(() => {
+    const set = new Set<string>(locallyReportedUrls);
+    for (const report of openMirrorReports) {
+      if (report.gameId === game.id && report.status === 'open' && report.mirrorUrl) {
+        set.add(report.mirrorUrl.trim());
+      }
+    }
+    for (const mirror of game.downloadLinks) {
+      if (mirror.healthStatus === 'issue_reported' && mirror.url) {
+        set.add(mirror.url.trim());
+      }
+    }
+    return Array.from(set);
+  }, [game.downloadLinks, game.id, locallyReportedUrls, openMirrorReports]);
+
   useEffect(() => {
     setActiveShotIndex(0);
     setShareStatus('idle');
     setWhatsNewDismissed(false);
     setMirrorStatusMap({});
+    setReportingMirrorIdx(null);
+    setReportReason('Dead link / file unavailable');
+    setLocallyReportedUrls([]);
   }, [game.id, adminUpdatedMs]);
 
   useEffect(() => {
@@ -187,7 +213,7 @@ export function GameDetailModal({
     void fetch('/api/mirrors/health', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ urls }),
+      body: JSON.stringify({ urls, reportedUrls: reportedUrlsForGame }),
       signal: controller.signal,
     })
       .then(async (res) => {
@@ -213,7 +239,7 @@ export function GameDetailModal({
       cancelled = true;
       controller.abort();
     };
-  }, [game.id, mirrorUrlsKey]);
+  }, [game.id, mirrorUrlsKey, reportedUrlsForGame]);
 
   useEffect(() => {
     if (!isRecentlyUpdatedByAdmin) return;
@@ -237,7 +263,9 @@ export function GameDetailModal({
   }, []);
 
   const handleShare = async () => {
-    const shareUrl = window.location.href;
+    const shareUrlObj = new URL(window.location.href);
+    shareUrlObj.searchParams.set('game', game.id);
+    const shareUrl = shareUrlObj.toString();
     let copied = false;
 
     if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
@@ -275,7 +303,7 @@ export function GameDetailModal({
     } else {
       showToast({
         title: 'Copy unavailable',
-        description: 'Unable to copy the page URL automatically in this browser.',
+        description: 'Unable to copy the game URL automatically in this browser.',
         variant: 'error',
       });
     }
@@ -403,6 +431,7 @@ export function GameDetailModal({
         body: JSON.stringify({
           urls,
           forceRefresh: true,
+          reportedUrls: reportedUrlsForGame,
         }),
       });
       const data = (await response.json()) as { results?: MirrorValidationResult[] };
@@ -411,22 +440,30 @@ export function GameDetailModal({
         let onlineCount = 0;
         let degradedCount = 0;
         let offlineCount = 0;
+        let issueReportedCount = 0;
         data.results.forEach((item) => {
           nextMap[item.url] = item;
           if (item.health === 'online') onlineCount += 1;
           else if (item.health === 'degraded') degradedCount += 1;
+          else if (item.health === 'issue_reported') issueReportedCount += 1;
           else offlineCount += 1;
         });
         setMirrorStatusMap(nextMap);
         const summaryParts = [
           onlineCount > 0 ? `${onlineCount} Online` : '',
           degradedCount > 0 ? `${degradedCount} Degraded` : '',
+          issueReportedCount > 0 ? `${issueReportedCount} Issue Reported` : '',
           offlineCount > 0 ? `${offlineCount} Offline` : '',
         ].filter(Boolean);
         showToast({
           title: 'Mirror health check complete',
           description: summaryParts.join(' · ') || `${data.results.length} mirrors checked.`,
-          variant: offlineCount > 0 ? 'error' : degradedCount > 0 ? 'info' : 'success',
+          variant:
+            offlineCount > 0 || issueReportedCount > 0
+              ? 'error'
+              : degradedCount > 0
+                ? 'info'
+                : 'success',
         });
       }
     } catch {
@@ -437,6 +474,112 @@ export function GameDetailModal({
       });
     } finally {
       setVerifyingMirrors(false);
+    }
+  };
+
+  const handleOpenReportForm = (idx: number) => {
+    if (isPreviewOnly) {
+      showToast({
+        title: 'Preview mode',
+        description: 'Publish this starter title to Firestore before reporting mirror issues.',
+        variant: 'info',
+      });
+      return;
+    }
+    if (!user) {
+      showToast({
+        title: 'Sign in required',
+        description: 'Sign in with Google to report dead mirror links to admins.',
+        variant: 'info',
+      });
+      onRequireAuth();
+      return;
+    }
+    setReportingMirrorIdx((prev) => (prev === idx ? null : idx));
+    setReportReason('Dead link / file unavailable');
+  };
+
+  const handleSubmitMirrorReport = async (mirror: DownloadMirror) => {
+    if (isPreviewOnly) return;
+    if (!user) {
+      onRequireAuth();
+      return;
+    }
+    if (!user.emailVerified) {
+      showToast({
+        title: 'Email verification required',
+        description: 'Only verified accounts can submit dead mirror reports.',
+        variant: 'error',
+      });
+      return;
+    }
+
+    const trimmedReason = reportReason.trim().slice(0, BLUEPRINT_LIMITS.REPORT_REASON_MAX);
+    const finalReason =
+      trimmedReason.length >= BLUEPRINT_LIMITS.REPORT_REASON_MIN
+        ? trimmedReason
+        : 'Dead link / file unavailable';
+    const reporterName = (
+      userDisplayName ||
+      user.displayName ||
+      user.email?.split('@')[0] ||
+      'Player'
+    ).slice(0, 80);
+
+    setSubmittingReport(true);
+    try {
+      await addDoc(collection(db, 'mirrorReports'), {
+        gameId: game.id,
+        gameTitle: game.title.slice(0, 120),
+        mirrorUrl: mirror.url.trim().slice(0, 1000),
+        mirrorLabel: (mirror.label || mirror.provider || 'Download Mirror').slice(0, 80),
+        mirrorProvider: (mirror.provider || 'Direct CDN').slice(0, 60),
+        userId: user.uid,
+        userName: reporterName,
+        reason: finalReason,
+        status: 'open',
+        createdAt: serverTimestamp(),
+      });
+
+      await addDoc(collection(db, 'activities'), {
+        userId: user.uid,
+        userName: reporterName,
+        actionType: 'mirror_report',
+        gameId: game.id,
+        gameTitle: game.title.slice(0, 120),
+        detail: `Reported dead mirror: ${mirror.provider} (${mirror.label}) — ${finalReason}`.slice(
+          0,
+          240
+        ),
+        createdAt: serverTimestamp(),
+      });
+
+      const trimmedUrl = mirror.url.trim();
+      setLocallyReportedUrls((prev) =>
+        prev.includes(trimmedUrl) ? prev : [...prev, trimmedUrl]
+      );
+      setMirrorStatusMap((prev) => ({
+        ...prev,
+        [mirror.url]: {
+          url: mirror.url,
+          valid: false,
+          provider: mirror.provider,
+          status: 'invalid',
+          health: 'issue_reported',
+          statusCode: 503,
+          reason: `Issue reported by ${reporterName}: ${finalReason}`,
+        },
+      }));
+      setReportingMirrorIdx(null);
+      showToast({
+        title: 'Dead link reported to admins',
+        description: `${mirror.provider} · ${mirror.label} is now flagged as Issue Reported.`,
+        variant: 'success',
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.CREATE, 'mirrorReports');
+    } finally {
+      setSubmittingReport(false);
     }
   };
 
@@ -457,15 +600,19 @@ export function GameDetailModal({
     let online = 0;
     let degraded = 0;
     let offline = 0;
+    let issueReported = 0;
     for (const mirror of game.downloadLinks) {
-      const health: MirrorHealthStatus | undefined =
-        resolvedMirrorStatusMap[mirror.url]?.health ?? mirror.healthStatus;
+      const isLocallyOrCommunityReported = reportedUrlsForGame.includes(mirror.url.trim());
+      const health: MirrorHealthStatus | undefined = isLocallyOrCommunityReported
+        ? 'issue_reported'
+        : (resolvedMirrorStatusMap[mirror.url]?.health ?? mirror.healthStatus);
       if (health === 'online') online += 1;
       else if (health === 'degraded') degraded += 1;
+      else if (health === 'issue_reported') issueReported += 1;
       else if (health === 'offline') offline += 1;
     }
-    return { online, degraded, offline };
-  }, [game.downloadLinks, resolvedMirrorStatusMap]);
+    return { online, degraded, offline, issueReported };
+  }, [game.downloadLinks, reportedUrlsForGame, resolvedMirrorStatusMap]);
 
   const handleSubmitReview = async (e: FormEvent) => {
     e.preventDefault();
@@ -636,12 +783,12 @@ export function GameDetailModal({
 
   return (
     <div
-      className="fixed inset-0 z-50 bg-slate-900/55 dark:bg-black/80 backdrop-blur-sm overflow-y-auto p-4 md:p-8"
+      className="fixed inset-0 z-50 bg-slate-900/55 dark:bg-black/80 backdrop-blur-sm overflow-y-auto p-4 md:p-8 animate-modal-backdrop"
       role="dialog"
       aria-modal="true"
       aria-label={game.title}
     >
-      <div className="max-w-6xl mx-auto bg-white dark:bg-[#111620] border border-slate-200 dark:border-slate-800 rounded-xl shadow-2xl overflow-hidden my-4">
+      <div className="max-w-6xl mx-auto bg-white dark:bg-[#111620] border border-slate-200 dark:border-slate-800 rounded-xl shadow-2xl overflow-hidden my-4 animate-modal-slide-up">
         {/* Top bar */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 dark:border-slate-800/90">
           <div className="min-w-0">
@@ -872,6 +1019,7 @@ export function GameDetailModal({
                   </h3>
                   {(mirrorHealthSummary.online > 0 ||
                     mirrorHealthSummary.degraded > 0 ||
+                    mirrorHealthSummary.issueReported > 0 ||
                     mirrorHealthSummary.offline > 0) && (
                     <span className="inline-flex items-center gap-2 text-xs text-slate-600 dark:text-slate-400">
                       <Activity className="w-3.5 h-3.5 text-slate-400" />
@@ -887,6 +1035,12 @@ export function GameDetailModal({
                           {mirrorHealthSummary.degraded} Degraded
                         </span>
                       )}
+                      {mirrorHealthSummary.issueReported > 0 && (
+                        <span className="inline-flex items-center gap-1 text-orange-700 dark:text-orange-400 font-medium">
+                          <span className="w-1.5 h-1.5 rounded-full bg-orange-500" />
+                          {mirrorHealthSummary.issueReported} Issue Reported
+                        </span>
+                      )}
                       {mirrorHealthSummary.offline > 0 && (
                         <span className="inline-flex items-center gap-1 text-red-700 dark:text-red-400 font-medium">
                           <span className="w-1.5 h-1.5 rounded-full bg-red-500" />
@@ -897,7 +1051,7 @@ export function GameDetailModal({
                   )}
                 </div>
                 <p className="text-xs text-slate-600 dark:text-slate-400 mt-0.5">
-                  Live mirror health indicators ping sources automatically. Signed-in downloads are tracked in your dashboard.
+                  Live mirror health indicators ping sources automatically. Report broken mirrors to alert admins immediately.
                 </p>
               </div>
               <button
@@ -924,11 +1078,23 @@ export function GameDetailModal({
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               {game.downloadLinks.map((mirror, idx) => {
                 const statusInfo = resolvedMirrorStatusMap[mirror.url];
-                const resolvedHealth: MirrorHealthStatus | 'checking' =
-                  statusInfo?.health ??
-                  mirror.healthStatus ??
-                  (verifyingMirrors ? 'checking' : 'degraded');
+                const isIssueReported =
+                  reportedUrlsForGame.includes(mirror.url.trim()) ||
+                  statusInfo?.health === 'issue_reported' ||
+                  mirror.healthStatus === 'issue_reported';
+                const resolvedHealth: MirrorHealthStatus | 'checking' = isIssueReported
+                  ? 'issue_reported'
+                  : (statusInfo?.health ??
+                    mirror.healthStatus ??
+                    (verifyingMirrors ? 'checking' : 'degraded'));
                 const safeHref = isSafeHttpOrAssetUrl(mirror.url) ? mirror.url : '#';
+                const isReportingThis = reportingMirrorIdx === idx;
+                const activeOpenReport = openMirrorReports.find(
+                  (r) =>
+                    r.gameId === game.id &&
+                    r.status === 'open' &&
+                    r.mirrorUrl.trim() === mirror.url.trim()
+                );
 
                 const healthConfig =
                   resolvedHealth === 'online'
@@ -945,74 +1111,167 @@ export function GameDetailModal({
                           badgeClass:
                             'bg-amber-500/10 text-amber-700 dark:text-amber-300 border-amber-500/25',
                         }
-                      : resolvedHealth === 'offline'
+                      : resolvedHealth === 'issue_reported'
                         ? {
-                            label: 'Offline',
-                            dotClass: 'bg-red-500',
+                            label: 'Issue Reported',
+                            dotClass: 'bg-orange-500',
                             badgeClass:
-                              'bg-red-500/10 text-red-700 dark:text-red-300 border-red-500/25',
+                              'bg-orange-500/10 text-orange-700 dark:text-orange-300 border-orange-500/30',
                           }
-                        : {
-                            label: 'Pinging...',
-                            dotClass: 'bg-slate-400 animate-pulse',
-                            badgeClass:
-                              'bg-slate-200/70 dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-slate-300 dark:border-slate-700',
-                          };
+                        : resolvedHealth === 'offline'
+                          ? {
+                              label: 'Offline',
+                              dotClass: 'bg-red-500',
+                              badgeClass:
+                                'bg-red-500/10 text-red-700 dark:text-red-300 border-red-500/25',
+                            }
+                          : {
+                              label: 'Pinging...',
+                              dotClass: 'bg-slate-400 animate-pulse',
+                              badgeClass:
+                                'bg-slate-200/70 dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-slate-300 dark:border-slate-700',
+                            };
 
                 const healthTooltip =
-                  statusInfo?.reason ||
-                  (statusInfo?.statusCode
-                    ? `HTTP ${statusInfo.statusCode}${
-                        typeof statusInfo.latencyMs === 'number'
-                          ? ` · ${statusInfo.latencyMs} ms`
-                          : ''
-                      }`
-                    : mirror.healthStatus
-                      ? `Stored mirror status: ${mirror.healthStatus}`
-                      : 'Live mirror probe');
+                  activeOpenReport
+                    ? `Issue reported by ${activeOpenReport.userName}: ${activeOpenReport.reason}`
+                    : statusInfo?.reason ||
+                      (statusInfo?.statusCode
+                        ? `HTTP ${statusInfo.statusCode}${
+                            typeof statusInfo.latencyMs === 'number'
+                              ? ` · ${statusInfo.latencyMs} ms`
+                              : ''
+                          }`
+                        : mirror.healthStatus
+                          ? `Stored mirror status: ${mirror.healthStatus}`
+                          : 'Live mirror probe');
 
                 return (
                   <div
                     key={`${mirror.provider}-${idx}`}
-                    className="flex items-center justify-between gap-4 p-4 rounded-lg bg-slate-50 dark:bg-[#0B0E14] border border-slate-200 hover:border-slate-300 dark:border-slate-800 dark:hover:border-slate-700 transition-colors"
+                    className="p-4 rounded-lg bg-slate-50 dark:bg-[#0B0E14] border border-slate-200 hover:border-slate-300 dark:border-slate-800 dark:hover:border-slate-700 transition-colors space-y-3"
                   >
-                    <div className="min-w-0 space-y-1.5">
-                      <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
-                        <span className="font-medium text-slate-800 dark:text-slate-200">
-                          {mirror.provider}
-                        </span>
-                        <span aria-hidden="true">·</span>
-                        <span>{mirror.partInfo || 'Full Build'}</span>
-                        <span
-                          title={healthTooltip}
-                          className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md border text-[11px] font-medium ${healthConfig.badgeClass}`}
-                        >
-                          <span className={`w-1.5 h-1.5 rounded-full ${healthConfig.dotClass}`} />
-                          <span>Health: {healthConfig.label}</span>
-                          {typeof statusInfo?.latencyMs === 'number' &&
-                            resolvedHealth === 'online' && (
-                              <span className="font-mono text-[10px] opacity-80">
-                                {statusInfo.latencyMs}ms
-                              </span>
-                            )}
-                        </span>
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                      <div className="min-w-0 space-y-1.5">
+                        <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+                          <span className="font-medium text-slate-800 dark:text-slate-200">
+                            {mirror.provider}
+                          </span>
+                          <span aria-hidden="true">·</span>
+                          <span>{mirror.partInfo || 'Full Build'}</span>
+                          <span
+                            title={healthTooltip}
+                            className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md border text-[11px] font-medium ${healthConfig.badgeClass}`}
+                          >
+                            <span className={`w-1.5 h-1.5 rounded-full ${healthConfig.dotClass}`} />
+                            <span>Health: {healthConfig.label}</span>
+                            {typeof statusInfo?.latencyMs === 'number' &&
+                              resolvedHealth === 'online' && (
+                                <span className="font-mono text-[10px] opacity-80">
+                                  {statusInfo.latencyMs}ms
+                                </span>
+                              )}
+                          </span>
+                        </div>
+                        <div className="text-sm font-medium text-slate-900 dark:text-white truncate">
+                          {mirror.label}
+                        </div>
                       </div>
-                      <div className="text-sm font-medium text-slate-900 dark:text-white truncate">
-                        {mirror.label}
+
+                      <div className="flex items-center gap-2 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => handleOpenReportForm(idx)}
+                          disabled={isIssueReported}
+                          title={
+                            isIssueReported
+                              ? 'Issue already reported — admins have been notified'
+                              : 'Report dead or broken mirror link to admins'
+                          }
+                          aria-label={
+                            isIssueReported
+                              ? `Issue reported for ${mirror.label}`
+                              : `Report Dead Link for ${mirror.label}`
+                          }
+                          className={`inline-flex items-center gap-1.5 px-2.5 py-2 rounded-lg border text-xs font-medium whitespace-nowrap transition-colors ${
+                            isIssueReported
+                              ? 'bg-orange-500/10 border-orange-500/30 text-orange-700 dark:text-orange-300 cursor-default'
+                              : isReportingThis
+                                ? 'bg-red-50 border-red-300 text-red-700 dark:bg-red-500/15 dark:border-red-500/40 dark:text-red-300'
+                                : 'bg-white hover:bg-red-50 border-slate-200 hover:border-red-300 text-slate-700 hover:text-red-700 dark:bg-[#131822] dark:hover:bg-red-500/10 dark:border-slate-700 dark:hover:border-red-500/40 dark:text-slate-300 dark:hover:text-red-300'
+                          }`}
+                        >
+                          <Flag className="w-3.5 h-3.5" />
+                          <span>{isIssueReported ? 'Issue Reported' : 'Report Dead Link'}</span>
+                        </button>
+
+                        <a
+                          href={safeHref}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          onClick={() => void handleMirrorDownload(mirror)}
+                          className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium whitespace-nowrap transition-colors"
+                        >
+                          <Download className="w-3.5 h-3.5" />
+                          <span>Download</span>
+                          <ExternalLink className="w-3 h-3 opacity-75" />
+                        </a>
                       </div>
                     </div>
 
-                    <a
-                      href={safeHref}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      onClick={() => void handleMirrorDownload(mirror)}
-                      className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium whitespace-nowrap shrink-0 transition-colors"
-                    >
-                      <Download className="w-3.5 h-3.5" />
-                      <span>Download</span>
-                      <ExternalLink className="w-3 h-3 opacity-75" />
-                    </a>
+                    {isReportingThis && !isIssueReported && (
+                      <div className="p-3 rounded-lg bg-white dark:bg-[#131822] border border-orange-200 dark:border-orange-500/30 space-y-2.5">
+                        <div className="flex items-center justify-between gap-2 text-xs font-medium text-slate-800 dark:text-slate-200">
+                          <span>Notify admins about broken mirror</span>
+                          <button
+                            type="button"
+                            onClick={() => setReportingMirrorIdx(null)}
+                            aria-label="Cancel dead link report"
+                            className="p-1 rounded text-slate-400 hover:text-slate-700 dark:hover:text-slate-200"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {[
+                            'Dead link / 404 Not Found',
+                            'File removed by host',
+                            'Corrupted or missing part',
+                          ].map((preset) => (
+                            <button
+                              key={preset}
+                              type="button"
+                              onClick={() => setReportReason(preset)}
+                              className={`px-2 py-1 rounded text-[11px] border transition-colors ${
+                                reportReason === preset
+                                  ? 'bg-orange-500/15 border-orange-500/40 text-orange-700 dark:text-orange-300 font-medium'
+                                  : 'bg-slate-50 dark:bg-[#0B0E14] border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+                              }`}
+                            >
+                              {preset}
+                            </button>
+                          ))}
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="text"
+                            maxLength={BLUEPRINT_LIMITS.REPORT_REASON_MAX}
+                            value={reportReason}
+                            onChange={(e) => setReportReason(e.target.value)}
+                            placeholder="Describe the mirror issue..."
+                            className="flex-1 px-3 py-1.5 rounded-md bg-slate-50 dark:bg-[#0B0E14] border border-slate-300 dark:border-slate-700 text-xs text-slate-900 dark:text-white focus:outline-none focus:border-orange-500"
+                          />
+                          <button
+                            type="button"
+                            disabled={submittingReport}
+                            onClick={() => void handleSubmitMirrorReport(mirror)}
+                            className="px-3 py-1.5 rounded-md bg-orange-600 hover:bg-orange-500 disabled:opacity-60 text-white text-xs font-medium whitespace-nowrap transition-colors"
+                          >
+                            {submittingReport ? 'Reporting...' : 'Notify Admins'}
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 );
               })}

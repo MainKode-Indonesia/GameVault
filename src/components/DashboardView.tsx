@@ -8,15 +8,21 @@ import {
   where,
 } from 'firebase/firestore';
 import {
+  AlertTriangle,
   Check,
+  CheckCircle2,
   ChevronLeft,
   ChevronRight,
   Edit3,
+  FileDown,
+  Flag,
   Plus,
+  RefreshCw,
   Search,
   ShieldAlert,
   Sparkles,
   Trash2,
+  X,
 } from 'lucide-react';
 import { db, handleFirestoreError, OperationType } from '../lib/firebase';
 import {
@@ -26,11 +32,14 @@ import {
   type ActivityActionType,
   type ActivityLog,
   type GameItem,
+  type MirrorReport,
+  type MirrorValidationResult,
   type UserProfile,
   type WishlistItem,
 } from '../types/game';
 import { RETRO_AVATARS } from '../data/retroAvatars';
 import { SafeImage } from './SafeImage';
+import { useToast } from './ToastProvider';
 
 interface DashboardViewProps {
   user: User | null;
@@ -39,13 +48,17 @@ interface DashboardViewProps {
   games: GameItem[];
   wishlist: WishlistItem[];
   activities: ActivityLog[];
+  mirrorReports?: MirrorReport[];
   onSignIn: () => void;
   onUpdateProfile: (updates: { displayName: string; photoURL: string }) => Promise<void>;
   onOpenGame: (game: GameItem) => void;
   onCreateGame: () => void;
   onEditGame: (game: GameItem) => void;
   onDeleteGame: (game: GameItem) => Promise<void>;
+  onResolveMirrorReport?: (report: MirrorReport) => Promise<void>;
   onSeedStarterCatalog: () => Promise<void>;
+  onExportCatalog: () => void;
+  onExportWishlist: () => void;
   seeding: boolean;
 }
 
@@ -54,6 +67,7 @@ const ACTION_LABELS: Record<ActivityActionType, string> = {
   wishlist_remove: 'Removed from Wishlist',
   download: 'Mirror Download',
   comment: 'Posted Review',
+  mirror_report: 'Reported Dead Link',
   game_publish: 'Game Published',
   game_update: 'Game Updated',
   game_delete: 'Game Deleted',
@@ -62,6 +76,16 @@ const ACTION_LABELS: Record<ActivityActionType, string> = {
 
 const ACTIVITY_PAGE_SIZE = 5;
 const AUDIT_PAGE_SIZE = 8;
+const LIBRARY_PAGE_SIZE = 5;
+
+interface DeadMirrorEntry {
+  gameId: string;
+  gameTitle: string;
+  label: string;
+  provider: string;
+  url: string;
+  reason: string;
+}
 
 function toMillis(ts: unknown): number {
   if (!ts || typeof ts !== 'object') return 0;
@@ -78,13 +102,17 @@ export function DashboardView({
   games,
   wishlist,
   activities,
+  mirrorReports = [],
   onSignIn,
   onUpdateProfile,
   onOpenGame,
   onCreateGame,
   onEditGame,
   onDeleteGame,
+  onResolveMirrorReport,
   onSeedStarterCatalog,
+  onExportCatalog,
+  onExportWishlist,
   seeding,
 }: DashboardViewProps) {
   const [dashboardSubView, setDashboardSubView] = useState<DashboardSubView>('overview');
@@ -95,10 +123,20 @@ export function DashboardView({
   const [auditFilter, setAuditFilter] = useState<'all' | ActivityActionType>('all');
   const [auditPage, setAuditPage] = useState(1);
   const [catalogSearch, setCatalogSearch] = useState('');
+  const [libraryPage, setLibraryPage] = useState(1);
+  const [checkingAllLinks, setCheckingAllLinks] = useState(false);
+  const [checkedLinkMap, setCheckedLinkMap] = useState<
+    Record<string, MirrorValidationResult>
+  >({});
+  const [deadLinkEntries, setDeadLinkEntries] = useState<DeadMirrorEntry[]>([]);
+  const [showDeadAlert, setShowDeadAlert] = useState(false);
+  const [lastLinkAuditAt, setLastLinkAuditAt] = useState<number | null>(null);
+  const [resolvingReportId, setResolvingReportId] = useState<string | null>(null);
   const [profileName, setProfileName] = useState('');
   const [selectedAvatarUrl, setSelectedAvatarUrl] = useState('');
   const [savingProfile, setSavingProfile] = useState(false);
   const [profileError, setProfileError] = useState<string | null>(null);
+  const { showToast } = useToast();
 
   useEffect(() => {
     if (!user) return;
@@ -217,6 +255,155 @@ export function DashboardView({
       g.developer.toLowerCase().includes(q)
     );
   });
+
+  const totalLibraryPages = Math.max(
+    1,
+    Math.ceil(filteredCatalogGames.length / LIBRARY_PAGE_SIZE)
+  );
+  const currentLibraryPage = Math.min(libraryPage, totalLibraryPages);
+  const libraryStartIndex = (currentLibraryPage - 1) * LIBRARY_PAGE_SIZE;
+  const paginatedCatalogGames = filteredCatalogGames.slice(
+    libraryStartIndex,
+    libraryStartIndex + LIBRARY_PAGE_SIZE
+  );
+
+  const openMirrorReports = mirrorReports.filter((r) => r.status === 'open');
+  const openReportedUrlSet = new Set(
+    openMirrorReports.map((r) => r.mirrorUrl.trim()).filter(Boolean)
+  );
+
+  const handleResolveReport = async (report: MirrorReport) => {
+    if (!onResolveMirrorReport) return;
+    setResolvingReportId(report.id);
+    try {
+      await onResolveMirrorReport(report);
+    } finally {
+      setResolvingReportId(null);
+    }
+  };
+
+  const handleCheckAllLibraryLinks = async () => {
+    const uniqueUrls = Array.from(
+      new Set(
+        games
+          .flatMap((game) => (game.downloadLinks ?? []).map((m) => m.url.trim()))
+          .filter(Boolean)
+      )
+    );
+
+    if (uniqueUrls.length === 0) {
+      showToast({
+        title: 'No links found',
+        description: 'There are no mirror links in the Library Directory to check.',
+        variant: 'info',
+      });
+      return;
+    }
+
+    const reportedUrls = Array.from(
+      new Set([
+        ...Array.from(openReportedUrlSet),
+        ...games.flatMap((game) =>
+          (game.downloadLinks ?? [])
+            .filter((m) => m.healthStatus === 'issue_reported')
+            .map((m) => m.url.trim())
+        ),
+      ])
+    );
+
+    setCheckingAllLinks(true);
+    try {
+      const nextMap: Record<string, MirrorValidationResult> = {};
+      const batchSize = 12;
+
+      for (let i = 0; i < uniqueUrls.length; i += batchSize) {
+        const batch = uniqueUrls.slice(i, i + batchSize);
+        const response = await fetch('/api/mirrors/health', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            urls: batch,
+            forceRefresh: true,
+            reportedUrls,
+          }),
+        });
+        if (!response.ok) {
+          throw new Error('Mirror health check request failed.');
+        }
+        const data = (await response.json()) as { results?: MirrorValidationResult[] };
+        for (const item of data.results ?? []) {
+          nextMap[item.url] = item;
+        }
+      }
+
+      const deadEntries: DeadMirrorEntry[] = [];
+      let degradedCount = 0;
+
+      for (const game of games) {
+        for (const mirror of game.downloadLinks ?? []) {
+          const res = nextMap[mirror.url.trim()];
+          if (!res) continue;
+          if (res.health === 'offline' || !res.valid) {
+            deadEntries.push({
+              gameId: game.id,
+              gameTitle: game.title,
+              label: mirror.label,
+              provider: mirror.provider,
+              url: mirror.url,
+              reason: res.reason || 'Mirror link is offline or unreachable.',
+            });
+          } else if (res.health === 'degraded') {
+            degradedCount += 1;
+          }
+        }
+      }
+
+      setCheckedLinkMap(nextMap);
+      setDeadLinkEntries(deadEntries);
+      setShowDeadAlert(deadEntries.length > 0);
+      setLastLinkAuditAt(Date.now());
+
+      if (deadEntries.length > 0) {
+        const previewList = deadEntries
+          .slice(0, 3)
+          .map((d) => `${d.gameTitle} — ${d.provider} (${d.url})`)
+          .join(' • ');
+        const extra =
+          deadEntries.length > 3 ? ` (+${deadEntries.length - 3} more)` : '';
+        showToast({
+          title: `${deadEntries.length} dead mirror ${deadEntries.length === 1 ? 'link' : 'links'} found`,
+          description: `${previewList}${extra}`,
+          variant: 'error',
+          durationMs: 8000,
+        });
+      } else if (degradedCount > 0) {
+        showToast({
+          title: `Checked ${uniqueUrls.length} links — no dead links`,
+          description: `${degradedCount} mirror(s) responded slowly or with rate-limiting.`,
+          variant: 'info',
+          durationMs: 5000,
+        });
+      } else {
+        showToast({
+          title: `All ${uniqueUrls.length} mirror links are online`,
+          description: `Verified across ${games.length} ${games.length === 1 ? 'game' : 'games'} in the Library Directory.`,
+          variant: 'success',
+          durationMs: 4500,
+        });
+      }
+    } catch (error) {
+      showToast({
+        title: 'Link check failed',
+        description:
+          error instanceof Error
+            ? error.message
+            : 'Unable to verify mirror links right now.',
+        variant: 'error',
+      });
+    } finally {
+      setCheckingAllLinks(false);
+    }
+  };
 
   const formatDate = (ts: unknown) => {
     if (!ts || typeof ts !== 'object') return 'Just now';
@@ -503,12 +690,106 @@ export function DashboardView({
           </div>
         </div>
         <div className="p-5 rounded-xl bg-white dark:bg-[#131822] border border-slate-200 dark:border-slate-800 shadow-xs dark:shadow-none">
-          <div className="text-xs text-slate-600 dark:text-slate-400">Logged Events</div>
-          <div className="text-2xl font-bold font-mono tabular-nums text-slate-900 dark:text-white mt-1.5">
-            {activities.length}
+          <div className="text-xs text-slate-600 dark:text-slate-400">
+            {isAdmin ? 'Open Mirror Reports' : 'Logged Events'}
+          </div>
+          <div
+            className={`text-2xl font-bold font-mono tabular-nums mt-1.5 ${
+              isAdmin && openMirrorReports.length > 0
+                ? 'text-orange-600 dark:text-orange-400'
+                : 'text-slate-900 dark:text-white'
+            }`}
+          >
+            {isAdmin ? openMirrorReports.length : activities.length}
           </div>
         </div>
       </div>
+
+      {isAdmin && openMirrorReports.length > 0 && (
+        <section
+          role="alert"
+          className="bg-orange-50/90 dark:bg-orange-500/10 border border-orange-200 dark:border-orange-500/35 rounded-xl p-5 space-y-4"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2.5">
+              <Flag className="w-4 h-4 text-orange-600 dark:text-orange-400 shrink-0" />
+              <div>
+                <h2 className="text-sm font-semibold text-orange-900 dark:text-orange-200">
+                  Reported Dead Mirrors ({openMirrorReports.length})
+                </h2>
+                <p className="text-xs text-orange-800/80 dark:text-orange-300/80">
+                  Players flagged these mirror URLs as broken. Edit the game mirror or mark resolved once verified.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div className="space-y-2.5">
+            {openMirrorReports.map((report) => {
+              const matchedGame = games.find((g) => g.id === report.gameId);
+              const isResolving = resolvingReportId === report.id;
+              return (
+                <div
+                  key={report.id}
+                  className="flex flex-wrap items-center justify-between gap-3 p-3.5 rounded-lg bg-white/90 dark:bg-[#0B0E14]/90 border border-orange-200/80 dark:border-orange-500/25"
+                >
+                  <div className="min-w-0 space-y-1">
+                    <div className="flex flex-wrap items-center gap-2 text-xs">
+                      <button
+                        type="button"
+                        onClick={() => matchedGame && onOpenGame(matchedGame)}
+                        className="font-semibold text-slate-900 dark:text-white hover:text-blue-600 dark:hover:text-blue-400 transition-colors"
+                      >
+                        {report.gameTitle}
+                      </button>
+                      <span aria-hidden="true" className="text-slate-400">·</span>
+                      <span className="font-medium text-orange-700 dark:text-orange-300">
+                        {report.mirrorProvider} ({report.mirrorLabel})
+                      </span>
+                      <span aria-hidden="true" className="text-slate-400">·</span>
+                      <span className="text-slate-600 dark:text-slate-400">
+                        Reported by {report.userName}
+                      </span>
+                      <span aria-hidden="true" className="text-slate-400">·</span>
+                      <span className="font-mono text-[11px] text-slate-500">
+                        {formatDate(report.createdAt)}
+                      </span>
+                    </div>
+                    <div className="text-xs text-slate-700 dark:text-slate-300">
+                      Reason: <span className="font-medium">{report.reason}</span>
+                    </div>
+                    <div className="font-mono text-[11px] text-slate-500 dark:text-slate-400 truncate max-w-2xl">
+                      {report.mirrorUrl}
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2 shrink-0">
+                    {matchedGame && (
+                      <button
+                        type="button"
+                        onClick={() => onEditGame(matchedGame)}
+                        className="px-3 py-1.5 rounded-md bg-orange-600 hover:bg-orange-500 text-white text-xs font-medium transition-colors"
+                      >
+                        Fix Link
+                      </button>
+                    )}
+                    {onResolveMirrorReport && (
+                      <button
+                        type="button"
+                        disabled={isResolving}
+                        onClick={() => void handleResolveReport(report)}
+                        className="px-3 py-1.5 rounded-md bg-slate-100 hover:bg-slate-200 border border-slate-300 text-slate-800 dark:bg-[#131822] dark:hover:bg-slate-800 dark:border-slate-700 dark:text-slate-200 disabled:opacity-50 text-xs font-medium transition-colors"
+                      >
+                        {isResolving ? 'Resolving...' : 'Mark Resolved'}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      )}
 
       {/* User Profile & Retro Character Avatar Management */}
       <section className="bg-white dark:bg-[#131822] border border-slate-200 dark:border-slate-800 rounded-xl p-6 shadow-xs dark:shadow-none">
@@ -750,11 +1031,24 @@ export function DashboardView({
 
         {/* User Wishlist Collection (Clean vertical covers) */}
         <div className="lg:col-span-4 bg-white dark:bg-[#131822] border border-slate-200 dark:border-slate-800 rounded-xl overflow-hidden shadow-xs dark:shadow-none">
-          <div className="px-5 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
+          <div className="px-5 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-2">
             <h2 className="text-base font-semibold text-slate-900 dark:text-white">Saved Collection</h2>
-            <span className="text-xs font-mono tabular-nums text-slate-600 dark:text-slate-400">
-              {wishlist.length} items
-            </span>
+            <div className="flex items-center gap-2.5">
+              {wishlist.length > 0 && (
+                <button
+                  type="button"
+                  onClick={onExportWishlist}
+                  title="Export wishlist backup as JSON"
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-slate-100 hover:bg-slate-200 border border-slate-200 text-slate-700 dark:bg-[#0B0E14] dark:hover:bg-slate-800 dark:border-slate-700 dark:text-slate-200 text-xs font-medium transition-colors"
+                >
+                  <FileDown className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+                  <span>JSON</span>
+                </button>
+              )}
+              <span className="text-xs font-mono tabular-nums text-slate-600 dark:text-slate-400">
+                {wishlist.length} items
+              </span>
+            </div>
           </div>
 
           {wishlist.length === 0 ? (
@@ -794,24 +1088,132 @@ export function DashboardView({
       <section className="bg-white dark:bg-[#131822] border border-slate-200 dark:border-slate-800 rounded-xl overflow-hidden shadow-xs dark:shadow-none">
         <div className="flex flex-wrap items-center justify-between gap-4 px-5 py-4 border-b border-slate-200 dark:border-slate-800">
           <div>
-            <h2 className="text-base font-semibold text-slate-900 dark:text-white">Library Directory</h2>
+            <div className="flex flex-wrap items-center gap-2.5">
+              <h2 className="text-base font-semibold text-slate-900 dark:text-white">Library Directory</h2>
+              {lastLinkAuditAt !== null && (
+                <span
+                  className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md border text-[11px] font-medium ${
+                    deadLinkEntries.length > 0
+                      ? 'bg-red-500/10 text-red-700 dark:text-red-300 border-red-500/30'
+                      : 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/30'
+                  }`}
+                >
+                  {deadLinkEntries.length > 0 ? (
+                    <>
+                      <AlertTriangle className="w-3 h-3" />
+                      <span>{deadLinkEntries.length} Dead Link(s)</span>
+                    </>
+                  ) : (
+                    <>
+                      <CheckCircle2 className="w-3 h-3" />
+                      <span>All Links OK</span>
+                    </>
+                  )}
+                </span>
+              )}
+            </div>
             <p className="text-xs text-slate-600 dark:text-slate-400 mt-0.5">
               {isAdmin
-                ? 'Registered admin session active — you can publish, edit, and remove titles.'
+                ? 'Registered admin session active — you can publish, edit, verify links, and remove titles.'
                 : 'Read-only directory overview of available builds and mirror counts.'}
             </p>
           </div>
-          <div className="relative w-full sm:w-64">
-            <Search className="w-4 h-4 text-slate-400 dark:text-slate-500 absolute left-3 top-1/2 -translate-y-1/2" />
-            <input
-              type="text"
-              value={catalogSearch}
-              onChange={(e) => setCatalogSearch(e.target.value)}
-              placeholder="Filter library..."
-              className="w-full pl-9 pr-3 py-2 rounded-lg bg-slate-50 dark:bg-[#0B0E14] border border-slate-300 dark:border-slate-800 text-xs text-slate-900 dark:text-white placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:outline-none focus:border-blue-500"
-            />
+          <div className="flex flex-wrap items-center gap-2.5 w-full sm:w-auto">
+            <div className="relative flex-1 sm:w-64">
+              <Search className="w-4 h-4 text-slate-400 dark:text-slate-500 absolute left-3 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                value={catalogSearch}
+                onChange={(e) => {
+                  setCatalogSearch(e.target.value);
+                  setLibraryPage(1);
+                }}
+                placeholder="Filter library..."
+                className="w-full pl-9 pr-3 py-2 rounded-lg bg-slate-50 dark:bg-[#0B0E14] border border-slate-300 dark:border-slate-800 text-xs text-slate-900 dark:text-white placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:outline-none focus:border-blue-500"
+              />
+            </div>
+            <button
+              type="button"
+              onClick={() => void handleCheckAllLibraryLinks()}
+              disabled={checkingAllLinks || games.length === 0}
+              title="Verify all download mirror URLs in the Library Directory"
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-slate-50 hover:bg-slate-100 border border-slate-300 text-slate-700 dark:bg-[#0B0E14] dark:hover:bg-slate-800 dark:border-slate-700 dark:text-slate-200 disabled:opacity-40 text-xs font-medium whitespace-nowrap transition-colors"
+            >
+              <RefreshCw
+                className={`w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400 ${
+                  checkingAllLinks ? 'animate-spin' : ''
+                }`}
+              />
+              <span>{checkingAllLinks ? 'Checking Links...' : 'Check All Links'}</span>
+            </button>
+            <button
+              type="button"
+              onClick={onExportCatalog}
+              disabled={games.length === 0}
+              title="Export catalog backup as JSON"
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-slate-50 hover:bg-slate-100 border border-slate-300 text-slate-700 dark:bg-[#0B0E14] dark:hover:bg-slate-800 dark:border-slate-700 dark:text-slate-200 disabled:opacity-40 text-xs font-medium whitespace-nowrap transition-colors"
+            >
+              <FileDown className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+              <span>Export Catalog</span>
+            </button>
           </div>
         </div>
+
+        {showDeadAlert && deadLinkEntries.length > 0 && (
+          <div
+            role="alert"
+            className="mx-5 mt-4 p-4 rounded-xl bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/35 space-y-2.5"
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-center gap-2 text-xs font-semibold text-red-700 dark:text-red-300">
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+                <span>
+                  {deadLinkEntries.length} Dead Mirror {deadLinkEntries.length === 1 ? 'Link' : 'Links'} Detected
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowDeadAlert(false)}
+                aria-label="Dismiss dead link alert"
+                className="p-1 rounded text-red-600 hover:bg-red-100 dark:text-red-300 dark:hover:bg-red-500/20 transition-colors"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+            <ul className="space-y-1.5 text-xs">
+              {deadLinkEntries.map((entry, idx) => {
+                const matchedGame = games.find((g) => g.id === entry.gameId);
+                return (
+                  <li
+                    key={`${entry.gameId}-${entry.url}-${idx}`}
+                    className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-lg bg-white/80 dark:bg-[#0B0E14]/80 border border-red-200/80 dark:border-red-500/20"
+                  >
+                    <div className="min-w-0 space-y-0.5">
+                      <div className="font-medium text-slate-900 dark:text-white">
+                        {entry.gameTitle}{' '}
+                        <span className="text-slate-500 dark:text-slate-400 font-normal">
+                          · {entry.provider} ({entry.label})
+                        </span>
+                      </div>
+                      <div className="font-mono text-[11px] text-red-700 dark:text-red-300 truncate max-w-xl">
+                        {entry.url} — {entry.reason}
+                      </div>
+                    </div>
+                    {isAdmin && matchedGame && (
+                      <button
+                        type="button"
+                        onClick={() => onEditGame(matchedGame)}
+                        className="px-2.5 py-1 rounded-md bg-red-600 hover:bg-red-500 text-white text-[11px] font-medium shrink-0 transition-colors"
+                      >
+                        Fix Link
+                      </button>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        )}
 
         <div className="overflow-x-auto">
           <table className="w-full text-left border-collapse">
@@ -829,69 +1231,167 @@ export function DashboardView({
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-200 dark:divide-slate-800/70 text-sm">
-              {filteredCatalogGames.map((game) => (
-                <tr key={game.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/30 transition-colors">
-                  <td className="py-3 px-5 font-medium text-slate-900 dark:text-white whitespace-nowrap">
-                    <button
-                      type="button"
-                      onClick={() => onOpenGame(game)}
-                      className="hover:text-blue-600 dark:hover:text-blue-400 transition-colors text-left"
-                    >
-                      {game.title}
-                    </button>
-                  </td>
-                  <td className="py-3 px-4 text-slate-700 dark:text-slate-300 whitespace-nowrap">{game.genre}</td>
-                  <td className="py-3 px-4 font-mono tabular-nums text-slate-700 dark:text-slate-300 whitespace-nowrap">
-                    {game.size}
-                  </td>
-                  <td className="py-3 px-4 font-mono tabular-nums text-amber-600 dark:text-amber-400 whitespace-nowrap">
-                    {(game.reviewCount ?? 0) > 0
-                      ? `${(game.rating ?? 0).toFixed(1)} (${game.reviewCount})`
-                      : 'Unrated'}
-                  </td>
-                  <td className="py-3 px-4 font-mono tabular-nums text-slate-700 dark:text-slate-300 whitespace-nowrap">
-                    {game.downloadLinks.length} links
-                  </td>
-                  <td className="py-3 px-4 font-mono tabular-nums text-slate-700 dark:text-slate-300 whitespace-nowrap">
-                    {game.screenshots.length} photos
-                  </td>
-                  {isAdmin && (
-                    <td className="py-3 px-5 text-right whitespace-nowrap">
+              {paginatedCatalogGames.map((game) => {
+                const gameLinkResults = (game.downloadLinks ?? [])
+                  .map((m) => checkedLinkMap[m.url.trim()])
+                  .filter((r): r is MirrorValidationResult => Boolean(r));
+                const reportedCount = (game.downloadLinks ?? []).filter(
+                  (m) =>
+                    openReportedUrlSet.has(m.url.trim()) ||
+                    m.healthStatus === 'issue_reported' ||
+                    checkedLinkMap[m.url.trim()]?.health === 'issue_reported'
+                ).length;
+                const deadCount = gameLinkResults.filter(
+                  (r) => r.health === 'offline' || (!r.valid && r.health !== 'issue_reported')
+                ).length;
+                const degradedCount = gameLinkResults.filter(
+                  (r) => r.health === 'degraded' && r.valid
+                ).length;
+
+                return (
+                  <tr key={game.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/30 transition-colors">
+                    <td className="py-3 px-5 font-medium text-slate-900 dark:text-white whitespace-nowrap">
+                      <button
+                        type="button"
+                        onClick={() => onOpenGame(game)}
+                        className="hover:text-blue-600 dark:hover:text-blue-400 transition-colors text-left"
+                      >
+                        {game.title}
+                      </button>
+                    </td>
+                    <td className="py-3 px-4 text-slate-700 dark:text-slate-300 whitespace-nowrap">{game.genre}</td>
+                    <td className="py-3 px-4 font-mono tabular-nums text-slate-700 dark:text-slate-300 whitespace-nowrap">
+                      {game.size}
+                    </td>
+                    <td className="py-3 px-4 font-mono tabular-nums text-amber-600 dark:text-amber-400 whitespace-nowrap">
+                      {(game.reviewCount ?? 0) > 0
+                        ? `${(game.rating ?? 0).toFixed(1)} (${game.reviewCount})`
+                        : 'Unrated'}
+                    </td>
+                    <td className="py-3 px-4 font-mono tabular-nums text-slate-700 dark:text-slate-300 whitespace-nowrap">
                       <div className="inline-flex items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={() => onEditGame(game)}
-                          aria-label={`Edit ${game.title}`}
-                          className="p-1.5 rounded text-slate-500 hover:text-slate-900 hover:bg-slate-100 dark:text-slate-400 dark:hover:text-white dark:hover:bg-slate-800 transition-colors"
-                        >
-                          <Edit3 className="w-4 h-4" />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => void onDeleteGame(game)}
-                          aria-label={`Delete ${game.title}`}
-                          className="p-1.5 rounded text-slate-500 hover:text-red-600 hover:bg-slate-100 dark:text-slate-400 dark:hover:text-red-400 dark:hover:bg-slate-800 transition-colors"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
+                        <span>{game.downloadLinks.length} links</span>
+                        {(gameLinkResults.length > 0 || reportedCount > 0) && (
+                          <span
+                            className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-sans font-medium ${
+                              reportedCount > 0
+                                ? 'bg-orange-500/10 text-orange-700 dark:text-orange-300'
+                                : deadCount > 0
+                                  ? 'bg-red-500/10 text-red-700 dark:text-red-300'
+                                  : degradedCount > 0
+                                    ? 'bg-amber-500/10 text-amber-700 dark:text-amber-300'
+                                    : 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
+                            }`}
+                          >
+                            <span
+                              className={`w-1.5 h-1.5 rounded-full ${
+                                reportedCount > 0
+                                  ? 'bg-orange-500'
+                                  : deadCount > 0
+                                    ? 'bg-red-500'
+                                    : degradedCount > 0
+                                      ? 'bg-amber-500'
+                                      : 'bg-emerald-500'
+                              }`}
+                            />
+                            {reportedCount > 0
+                              ? `${reportedCount} issue reported`
+                              : deadCount > 0
+                                ? `${deadCount} dead`
+                                : degradedCount > 0
+                                  ? `${degradedCount} slow`
+                                  : 'All OK'}
+                          </span>
+                        )}
                       </div>
                     </td>
-                  )}
-                </tr>
-              ))}
+                    <td className="py-3 px-4 font-mono tabular-nums text-slate-700 dark:text-slate-300 whitespace-nowrap">
+                      {game.screenshots.length} photos
+                    </td>
+                    {isAdmin && (
+                      <td className="py-3 px-5 text-right whitespace-nowrap">
+                        <div className="inline-flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => onEditGame(game)}
+                            aria-label={`Edit ${game.title}`}
+                            className="p-1.5 rounded text-slate-500 hover:text-slate-900 hover:bg-slate-100 dark:text-slate-400 dark:hover:text-white dark:hover:bg-slate-800 transition-colors"
+                          >
+                            <Edit3 className="w-4 h-4" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void onDeleteGame(game)}
+                            aria-label={`Delete ${game.title}`}
+                            className="p-1.5 rounded text-slate-500 hover:text-red-600 hover:bg-slate-100 dark:text-slate-400 dark:hover:text-red-400 dark:hover:bg-slate-800 transition-colors"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </td>
+                    )}
+                  </tr>
+                );
+              })}
               {filteredCatalogGames.length === 0 && (
                 <tr>
                   <td
                     colSpan={isAdmin ? 7 : 6}
                     className="py-8 text-center text-sm text-slate-600 dark:text-slate-400"
                   >
-                    No games published in Firestore catalog yet.
+                    {games.length === 0
+                      ? 'No games published in Firestore catalog yet.'
+                      : 'No titles match your library filter.'}
                   </td>
                 </tr>
               )}
             </tbody>
           </table>
         </div>
+
+        {filteredCatalogGames.length > 0 && (
+          <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-3 border-t border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-[#0B0E14]/60 text-xs">
+            <span className="text-slate-600 dark:text-slate-400 font-mono tabular-nums">
+              Showing {libraryStartIndex + 1}–
+              {Math.min(libraryStartIndex + LIBRARY_PAGE_SIZE, filteredCatalogGames.length)} of{' '}
+              {filteredCatalogGames.length}
+            </span>
+
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() =>
+                  setLibraryPage((prev) =>
+                    Math.max(1, Math.min(prev, totalLibraryPages) - 1)
+                  )
+                }
+                disabled={currentLibraryPage <= 1}
+                aria-label="Previous library page"
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-[#131822] text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+              >
+                <ChevronLeft className="w-3.5 h-3.5" />
+                <span>Prev</span>
+              </button>
+
+              <span className="px-2 font-mono tabular-nums text-slate-700 dark:text-slate-300">
+                {currentLibraryPage} / {totalLibraryPages}
+              </span>
+
+              <button
+                type="button"
+                onClick={() =>
+                  setLibraryPage((prev) => Math.min(totalLibraryPages, prev + 1))
+                }
+                disabled={currentLibraryPage >= totalLibraryPages}
+                aria-label="Next library page"
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-[#131822] text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+              >
+                <span>Next</span>
+                <ChevronRight className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          </div>
+        )}
       </section>
         </>
       )}

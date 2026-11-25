@@ -154,7 +154,7 @@ function requireAdmin(
   next();
 }
 
-type MirrorHealthStatus = 'online' | 'degraded' | 'offline';
+type MirrorHealthStatus = 'online' | 'degraded' | 'offline' | 'issue_reported';
 
 interface MirrorInspectionResult {
   url: string;
@@ -204,9 +204,20 @@ async function probeRemoteMirror(targetUrl: string): Promise<{
   }
 }
 
+function normalizeReportedUrls(raw: unknown): Set<string> {
+  if (!Array.isArray(raw)) return new Set();
+  return new Set(
+    raw
+      .slice(0, 50)
+      .filter((item): item is string => typeof item === 'string')
+      .map((item) => item.trim())
+      .filter(Boolean)
+  );
+}
+
 async function inspectMirrorUrls(
   urls: unknown[],
-  options: { forceRefresh?: boolean } = {}
+  options: { forceRefresh?: boolean; reportedUrls?: Set<string> } = {}
 ): Promise<MirrorInspectionResult[]> {
   const now = Date.now();
   return Promise.all(
@@ -281,6 +292,18 @@ async function inspectMirrorUrls(
       }
 
       const cacheKey = parsed.toString();
+      if (options.reportedUrls?.has(trimmed) || options.reportedUrls?.has(cacheKey)) {
+        return {
+          url: trimmed,
+          valid: false,
+          provider,
+          status: 'invalid',
+          health: 'issue_reported',
+          statusCode: 503,
+          reason: 'Issue reported by user — awaiting admin verification.',
+        };
+      }
+
       if (!options.forceRefresh) {
         const cached = mirrorHealthCache.get(cacheKey);
         if (cached && cached.expiresAt > now) {
@@ -385,13 +408,18 @@ async function startServer() {
 
   // Public SSRF-guarded mirror health ping endpoint (supports automatic status checks)
   app.post('/api/mirrors/health', async (req: Request, res: Response) => {
-    const body = req.body as { urls?: unknown; forceRefresh?: unknown };
+    const body = req.body as {
+      urls?: unknown;
+      forceRefresh?: unknown;
+      reportedUrls?: unknown;
+    };
     if (!Array.isArray(body?.urls) || body.urls.length === 0 || body.urls.length > 12) {
       res.status(400).json({ error: 'Provide an array of 1 to 12 mirror URLs.' });
       return;
     }
     const results = await inspectMirrorUrls(body.urls, {
       forceRefresh: body.forceRefresh === true,
+      reportedUrls: normalizeReportedUrls(body.reportedUrls),
     });
     res.json({ results });
   });
@@ -402,13 +430,18 @@ async function startServer() {
     requireAuth,
     requireAdmin,
     async (req: AuthenticatedRequest, res) => {
-      const body = req.body as { urls?: unknown; forceRefresh?: unknown };
+      const body = req.body as {
+        urls?: unknown;
+        forceRefresh?: unknown;
+        reportedUrls?: unknown;
+      };
       if (!Array.isArray(body?.urls) || body.urls.length === 0 || body.urls.length > 12) {
         res.status(400).json({ error: 'Provide an array of 1 to 12 mirror URLs.' });
         return;
       }
       const results = await inspectMirrorUrls(body.urls, {
         forceRefresh: body.forceRefresh === true,
+        reportedUrls: normalizeReportedUrls(body.reportedUrls),
       });
       res.json({ results });
     }
@@ -416,13 +449,18 @@ async function startServer() {
 
   // Authenticated user mirror verification endpoint
   app.post('/api/mirrors/validate', requireAuth, async (req: AuthenticatedRequest, res) => {
-    const body = req.body as { urls?: unknown; forceRefresh?: unknown };
+    const body = req.body as {
+      urls?: unknown;
+      forceRefresh?: unknown;
+      reportedUrls?: unknown;
+    };
     if (!Array.isArray(body?.urls) || body.urls.length === 0 || body.urls.length > 12) {
       res.status(400).json({ error: 'Provide an array of 1 to 12 mirror URLs.' });
       return;
     }
     const results = await inspectMirrorUrls(body.urls, {
       forceRefresh: body.forceRefresh === true,
+      reportedUrls: normalizeReportedUrls(body.reportedUrls),
     });
     res.json({ results });
   });

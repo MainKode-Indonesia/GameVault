@@ -83,7 +83,7 @@
         },
         "downloadLinks": {
           "type": "array",
-          "description": "Array of mirror download sources (label, provider, url, partInfo, optional healthStatus: online | degraded | offline)."
+          "description": "Array of mirror download sources (label, provider, url, partInfo, optional healthStatus: online | degraded | offline | issue_reported)."
         },
         "featured": {
           "type": "boolean",
@@ -414,6 +414,7 @@
             "wishlist_remove",
             "download",
             "comment",
+            "mirror_report",
             "game_publish",
             "game_update",
             "game_delete",
@@ -448,6 +449,85 @@
         "gameId",
         "gameTitle",
         "detail",
+        "createdAt"
+      ]
+    },
+    "MirrorReport": {
+      "title": "MirrorReport",
+      "description": "User-submitted broken/dead mirror link report to notify catalog administrators.",
+      "type": "object",
+      "properties": {
+        "gameId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "gameTitle": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "mirrorUrl": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 1000
+        },
+        "mirrorLabel": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "mirrorProvider": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60
+        },
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "status": {
+          "type": "string",
+          "enum": ["open", "resolved"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "resolvedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "resolvedBy": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        }
+      },
+      "required": [
+        "gameId",
+        "gameTitle",
+        "mirrorUrl",
+        "mirrorLabel",
+        "mirrorProvider",
+        "userId",
+        "userName",
+        "reason",
+        "status",
         "createdAt"
       ]
     }
@@ -494,6 +574,12 @@
         "$ref": "#/entities/ActivityLog"
       },
       "description": "Activity telemetry log scoped to the owner or admin."
+    },
+    "/mirrorReports/{reportId}": {
+      "schema": {
+        "$ref": "#/entities/MirrorReport"
+      },
+      "description": "Dead mirror link reports submitted by verified users to notify admins and flag Issue Reported status."
     }
   }
 }

@@ -83,7 +83,7 @@ service cloud.firestore {
       && data.downloadLinks[0].provider is string && data.downloadLinks[0].provider.size() >= 1 && data.downloadLinks[0].provider.size() <= 60
       && data.downloadLinks[0].url is string && data.downloadLinks[0].url.size() >= 5 && data.downloadLinks[0].url.size() <= 1000
       && data.downloadLinks[0].partInfo is string && data.downloadLinks[0].partInfo.size() <= 80
-      && (!('healthStatus' in data.downloadLinks[0]) || data.downloadLinks[0].healthStatus in ['online', 'degraded', 'offline'])
+      && (!('healthStatus' in data.downloadLinks[0]) || data.downloadLinks[0].healthStatus in ['online', 'degraded', 'offline', 'issue_reported'])
       && data.featured is bool
       && data.visibility in ['public', 'draft']
       && (data.downloadsCount is int || data.downloadsCount is float) && data.downloadsCount >= 0
@@ -172,6 +172,7 @@ service cloud.firestore {
         'wishlist_remove',
         'download',
         'comment',
+        'mirror_report',
         'game_publish',
         'game_update',
         'game_delete',
@@ -180,6 +181,29 @@ service cloud.firestore {
       && data.gameTitle is string && data.gameTitle.size() >= 1 && data.gameTitle.size() <= 120
       && data.detail is string && data.detail.size() >= 1 && data.detail.size() <= 240
       && data.createdAt is timestamp;
+    }
+
+    function isValidMirrorReport(data) {
+      return data.keys().hasAll([
+        'gameId', 'gameTitle', 'mirrorUrl', 'mirrorLabel', 'mirrorProvider',
+        'userId', 'userName', 'reason', 'status', 'createdAt'
+      ])
+      && data.keys().hasOnly([
+        'gameId', 'gameTitle', 'mirrorUrl', 'mirrorLabel', 'mirrorProvider',
+        'userId', 'userName', 'reason', 'status', 'createdAt', 'resolvedAt', 'resolvedBy'
+      ])
+      && isValidId(data.gameId)
+      && data.gameTitle is string && data.gameTitle.size() >= 1 && data.gameTitle.size() <= 120
+      && data.mirrorUrl is string && data.mirrorUrl.size() >= 5 && data.mirrorUrl.size() <= 1000
+      && data.mirrorLabel is string && data.mirrorLabel.size() >= 1 && data.mirrorLabel.size() <= 80
+      && data.mirrorProvider is string && data.mirrorProvider.size() >= 1 && data.mirrorProvider.size() <= 60
+      && isValidId(data.userId)
+      && data.userName is string && data.userName.size() >= 1 && data.userName.size() <= 80
+      && data.reason is string && data.reason.size() >= 1 && data.reason.size() <= 300
+      && data.status in ['open', 'resolved']
+      && data.createdAt is timestamp
+      && (!('resolvedAt' in data) || data.resolvedAt is timestamp)
+      && (!('resolvedBy' in data) || isValidId(data.resolvedBy));
     }
 
     function isValidRatingAggregateTransition(gameId) {
@@ -471,6 +495,57 @@ service cloud.firestore {
 
       allow update: if false;
       allow delete: if isValidId(activityId) && isAdmin();
+    }
+
+    // Dead Mirror Link Reports (Verified users can report broken links; open reports visible for health status; admins resolve/delete)
+    match /mirrorReports/{reportId} {
+      allow get: if isValidId(reportId)
+        && (
+          isAdmin() ||
+          (resource != null && (existing().status == 'open' || (isSignedIn() && existing().userId == request.auth.uid)))
+        );
+      allow list: if existing().status == 'open'
+        || isBootstrappedAdmin()
+        || (isSignedIn() && existing().userId == request.auth.uid);
+
+      allow create: if isValidId(reportId)
+        && isVerifiedUser()
+        && isValidMirrorReport(incoming())
+        && incoming().userId == request.auth.uid
+        && incoming().status == 'open'
+        && !('resolvedAt' in incoming())
+        && !('resolvedBy' in incoming())
+        && incoming().createdAt == request.time
+        && exists(/databases/$(database)/documents/games/$(incoming().gameId))
+        && (get(/databases/$(database)/documents/games/$(incoming().gameId)).data.visibility == 'public' || isAdmin());
+
+      allow update: if isValidId(reportId)
+        && isAdmin()
+        && isValidMirrorReport(incoming())
+        && incoming().gameId == existing().gameId
+        && incoming().gameTitle == existing().gameTitle
+        && incoming().mirrorUrl == existing().mirrorUrl
+        && incoming().mirrorLabel == existing().mirrorLabel
+        && incoming().mirrorProvider == existing().mirrorProvider
+        && incoming().userId == existing().userId
+        && incoming().userName == existing().userName
+        && incoming().reason == existing().reason
+        && incoming().createdAt == existing().createdAt
+        && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'resolvedAt', 'resolvedBy'])
+        && (
+          (
+            incoming().status == 'resolved'
+            && incoming().resolvedAt == request.time
+            && incoming().resolvedBy == request.auth.uid
+          ) ||
+          (
+            incoming().status == 'open'
+            && !('resolvedAt' in incoming())
+            && !('resolvedBy' in incoming())
+          )
+        );
+
+      allow delete: if isValidId(reportId) && isAdmin();
     }
   }
 }
