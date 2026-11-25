@@ -37,8 +37,14 @@ interface GameFormModalProps {
 }
 
 const MIRROR_PROVIDERS = [
-  'Direct CDN',
+  'GitHub Releases',
+  'SourceForge',
+  'Itch.io',
+  'Flathub',
+  'Official CDN',
+  'Official Site',
   'Google Drive',
+  'Direct CDN',
   'MediaFire',
   'Mega.nz',
   'PixelDrain',
@@ -75,7 +81,7 @@ export function GameFormModal({ initialGame, onClose, onSave }: GameFormModalPro
   const [downloadLinks, setDownloadLinks] = useState<DownloadMirror[]>(
     initialGame?.downloadLinks && initialGame.downloadLinks.length >= 1
       ? initialGame.downloadLinks
-      : [{ label: 'Primary Full Build', provider: 'Direct CDN', url: '', partInfo: 'Single Archive' }]
+      : [{ label: 'Primary Full Build', provider: 'GitHub Releases', url: '', partInfo: 'Single Archive' }]
   );
   const [featured, setFeatured] = useState(initialGame?.featured ?? false);
   const [visibility, setVisibility] = useState<'public' | 'draft'>(
@@ -663,7 +669,7 @@ export function GameFormModal({ initialGame, onClose, onSave }: GameFormModalPro
                           next[idx] = { ...next[idx], url: e.target.value };
                           setDownloadLinks(next);
                         }}
-                        placeholder="https://drive.google.com/..."
+                        placeholder="https://github.com/owner/repo/releases/download/..."
                         className="flex-1 px-3 py-2 rounded-md bg-white dark:bg-[#131822] border border-slate-300 dark:border-slate-700/80 text-xs font-mono text-slate-900 dark:text-white placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:outline-none focus:border-blue-500"
                       />
                       {downloadLinks.length > 1 && (

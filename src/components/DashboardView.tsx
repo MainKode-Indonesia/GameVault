@@ -2,6 +2,8 @@ import { useEffect, useState, type FormEvent } from 'react';
 import type { User } from 'firebase/auth';
 import {
   Check,
+  ChevronLeft,
+  ChevronRight,
   Edit3,
   Plus,
   Search,
@@ -45,6 +47,8 @@ const ACTION_LABELS: Record<ActivityActionType, string> = {
   game_publish: 'Catalog Update',
 };
 
+const ACTIVITY_PAGE_SIZE = 5;
+
 export function DashboardView({
   user,
   userProfile,
@@ -62,6 +66,7 @@ export function DashboardView({
   seeding,
 }: DashboardViewProps) {
   const [activityFilter, setActivityFilter] = useState<'all' | ActivityActionType>('all');
+  const [activityPage, setActivityPage] = useState(1);
   const [catalogSearch, setCatalogSearch] = useState('');
   const [profileName, setProfileName] = useState('');
   const [selectedAvatarUrl, setSelectedAvatarUrl] = useState('');
@@ -126,6 +131,16 @@ export function DashboardView({
   const totalDownloads = games.reduce((sum, g) => sum + (g.downloadsCount || 0), 0);
   const filteredActivities = activities.filter((act) =>
     activityFilter === 'all' ? true : act.actionType === activityFilter
+  );
+  const totalActivityPages = Math.max(
+    1,
+    Math.ceil(filteredActivities.length / ACTIVITY_PAGE_SIZE)
+  );
+  const currentActivityPage = Math.min(activityPage, totalActivityPages);
+  const activityStartIndex = (currentActivityPage - 1) * ACTIVITY_PAGE_SIZE;
+  const paginatedActivities = filteredActivities.slice(
+    activityStartIndex,
+    activityStartIndex + ACTIVITY_PAGE_SIZE
   );
 
   const filteredCatalogGames = games.filter((g) => {
@@ -360,7 +375,10 @@ export function DashboardView({
                 <button
                   key={tab.id}
                   type="button"
-                  onClick={() => setActivityFilter(tab.id)}
+                  onClick={() => {
+                    setActivityFilter(tab.id);
+                    setActivityPage(1);
+                  }}
                   className={`px-3 py-1 rounded-md text-xs font-medium whitespace-nowrap transition-colors ${
                     activityFilter === tab.id
                       ? 'bg-blue-600 text-white'
@@ -378,40 +396,78 @@ export function DashboardView({
               No activity events recorded for this filter yet.
             </div>
           ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-left border-collapse">
-                <thead>
-                  <tr className="border-b border-slate-200 dark:border-slate-800 text-xs text-slate-600 dark:text-slate-400">
-                    <th className="py-3 px-5 font-medium">User</th>
-                    <th className="py-3 px-4 font-medium">Event</th>
-                    <th className="py-3 px-4 font-medium">Game</th>
-                    <th className="py-3 px-4 font-medium">Detail</th>
-                    <th className="py-3 px-5 font-medium text-right">Time</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-200 dark:divide-slate-800/70 text-sm">
-                  {filteredActivities.slice(0, 25).map((act) => (
-                    <tr key={act.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/30 transition-colors">
-                      <td className="py-3 px-5 text-slate-800 dark:text-slate-200 font-medium whitespace-nowrap">
-                        {act.userName}
-                      </td>
-                      <td className="py-3 px-4 text-slate-700 dark:text-slate-300 whitespace-nowrap">
-                        {ACTION_LABELS[act.actionType] || act.actionType}
-                      </td>
-                      <td className="py-3 px-4 text-slate-900 dark:text-white font-medium whitespace-nowrap">
-                        {act.gameTitle}
-                      </td>
-                      <td className="py-3 px-4 text-slate-600 dark:text-slate-400 text-xs max-w-[240px] truncate">
-                        {act.detail}
-                      </td>
-                      <td className="py-3 px-5 text-right font-mono text-xs tabular-nums text-slate-600 dark:text-slate-400 whitespace-nowrap">
-                        {formatDate(act.createdAt)}
-                      </td>
+            <>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse">
+                  <thead>
+                    <tr className="border-b border-slate-200 dark:border-slate-800 text-xs text-slate-600 dark:text-slate-400">
+                      <th className="py-3 px-5 font-medium">User</th>
+                      <th className="py-3 px-4 font-medium">Event</th>
+                      <th className="py-3 px-4 font-medium">Game</th>
+                      <th className="py-3 px-4 font-medium">Detail</th>
+                      <th className="py-3 px-5 font-medium text-right">Time</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                  </thead>
+                  <tbody className="divide-y divide-slate-200 dark:divide-slate-800/70 text-sm">
+                    {paginatedActivities.map((act) => (
+                      <tr key={act.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/30 transition-colors">
+                        <td className="py-3 px-5 text-slate-800 dark:text-slate-200 font-medium whitespace-nowrap">
+                          {act.userName}
+                        </td>
+                        <td className="py-3 px-4 text-slate-700 dark:text-slate-300 whitespace-nowrap">
+                          {ACTION_LABELS[act.actionType] || act.actionType}
+                        </td>
+                        <td className="py-3 px-4 text-slate-900 dark:text-white font-medium whitespace-nowrap">
+                          {act.gameTitle}
+                        </td>
+                        <td className="py-3 px-4 text-slate-600 dark:text-slate-400 text-xs max-w-[240px] truncate">
+                          {act.detail}
+                        </td>
+                        <td className="py-3 px-5 text-right font-mono text-xs tabular-nums text-slate-600 dark:text-slate-400 whitespace-nowrap">
+                          {formatDate(act.createdAt)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-3 border-t border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-[#0B0E14]/60 text-xs">
+                <span className="text-slate-600 dark:text-slate-400 font-mono tabular-nums">
+                  Showing {activityStartIndex + 1}–
+                  {Math.min(activityStartIndex + ACTIVITY_PAGE_SIZE, filteredActivities.length)} of{' '}
+                  {filteredActivities.length}
+                </span>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setActivityPage((prev) => Math.max(1, Math.min(prev, totalActivityPages) - 1))}
+                    disabled={currentActivityPage <= 1}
+                    aria-label="Previous activity page"
+                    className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-[#131822] text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                  >
+                    <ChevronLeft className="w-3.5 h-3.5" />
+                    <span>Prev</span>
+                  </button>
+
+                  <span className="px-2 font-mono tabular-nums text-slate-700 dark:text-slate-300">
+                    {currentActivityPage} / {totalActivityPages}
+                  </span>
+
+                  <button
+                    type="button"
+                    onClick={() => setActivityPage((prev) => Math.min(totalActivityPages, prev + 1))}
+                    disabled={currentActivityPage >= totalActivityPages}
+                    aria-label="Next activity page"
+                    className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-[#131822] text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                  >
+                    <span>Next</span>
+                    <ChevronRight className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+            </>
           )}
         </div>
 

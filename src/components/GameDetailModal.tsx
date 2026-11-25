@@ -77,6 +77,45 @@ function formatRelativeAge(ageMs: number): string {
   return `${days}d ago`;
 }
 
+function ReviewUserAvatar({
+  photoUrl,
+  name,
+  sizeClass = 'w-8 h-8',
+}: {
+  photoUrl?: string;
+  name: string;
+  sizeClass?: string;
+}) {
+  const [imgFailed, setImgFailed] = useState(false);
+
+  useEffect(() => {
+    setImgFailed(false);
+  }, [photoUrl]);
+
+  const initial = (name || 'P').trim().slice(0, 1).toUpperCase() || 'P';
+
+  if (photoUrl && isSafeHttpOrAssetUrl(photoUrl) && !imgFailed) {
+    return (
+      <img
+        src={photoUrl}
+        alt={name}
+        referrerPolicy="no-referrer"
+        onError={() => setImgFailed(true)}
+        className={`${sizeClass} rounded-full object-cover border border-slate-300 dark:border-slate-700 bg-slate-100 dark:bg-[#0B0E14] shrink-0`}
+      />
+    );
+  }
+
+  return (
+    <div
+      aria-hidden="true"
+      className={`${sizeClass} rounded-full bg-slate-200 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200 text-xs font-semibold flex items-center justify-center shrink-0`}
+    >
+      {initial}
+    </div>
+  );
+}
+
 export function GameDetailModal({
   game,
   user,
@@ -881,11 +920,18 @@ export function GameDetailModal({
                 className="p-4 rounded-lg bg-slate-50 dark:bg-[#0B0E14] border border-slate-200 dark:border-slate-800 space-y-3"
               >
                 <div className="flex flex-wrap items-center justify-between gap-2">
-                  <span className="text-xs font-medium text-slate-700 dark:text-slate-300">
-                    {userExistingReview
-                      ? `Update your 5-star review as ${user.displayName || user.email}`
-                      : `Rate & review as ${user.displayName || user.email}`}
-                  </span>
+                  <div className="flex items-center gap-2 min-w-0">
+                    <ReviewUserAvatar
+                      photoUrl={userAvatarUrl || user.photoURL || ''}
+                      name={userDisplayName || user.displayName || user.email || 'Player'}
+                      sizeClass="w-6 h-6"
+                    />
+                    <span className="text-xs font-medium text-slate-700 dark:text-slate-300 truncate">
+                      {userExistingReview
+                        ? `Update your 5-star review as ${userDisplayName || user.displayName || user.email}`
+                        : `Rate & review as ${userDisplayName || user.displayName || user.email}`}
+                    </span>
+                  </div>
                   <div
                     className="flex items-center gap-1"
                     onMouseLeave={() => setHoverRating(null)}
@@ -974,30 +1020,43 @@ export function GameDetailModal({
                   const canDelete = Boolean(
                     user && (user.uid === review.userId || isAdmin)
                   );
+                  const resolvedPhoto =
+                    user && user.uid === review.userId && userAvatarUrl
+                      ? userAvatarUrl
+                      : review.userPhoto;
                   return (
                     <div key={review.id} className="py-4 flex items-start justify-between gap-4">
-                      <div className="space-y-1.5 min-w-0">
-                        <div className="flex flex-wrap items-center gap-2 text-xs">
-                          <span className="font-semibold text-slate-900 dark:text-slate-100">
-                            {review.userName}
-                          </span>
-                          <span aria-hidden="true" className="text-slate-400 dark:text-slate-600">
-                            ·
-                          </span>
-                          <span className="text-amber-600 dark:text-amber-400 font-mono tabular-nums inline-flex items-center gap-1">
-                            <Star className="w-3 h-3 fill-amber-500 text-amber-500 dark:fill-amber-400 dark:text-amber-400" />
-                            {review.rating}/5
-                          </span>
-                          <span aria-hidden="true" className="text-slate-400 dark:text-slate-600">
-                            ·
-                          </span>
-                          <span className="text-slate-500 dark:text-slate-400 font-mono">
-                            {formatTimestamp(review.updatedAt || review.createdAt)}
-                          </span>
+                      <div className="flex items-start gap-3 min-w-0">
+                        <div className="mt-0.5 shrink-0">
+                          <ReviewUserAvatar
+                            photoUrl={resolvedPhoto}
+                            name={review.userName}
+                            sizeClass="w-8 h-8"
+                          />
                         </div>
-                        <p className="text-sm text-slate-700 dark:text-slate-300 leading-relaxed break-words">
-                          {review.content}
-                        </p>
+                        <div className="space-y-1.5 min-w-0">
+                          <div className="flex flex-wrap items-center gap-2 text-xs">
+                            <span className="font-semibold text-slate-900 dark:text-slate-100">
+                              {review.userName}
+                            </span>
+                            <span aria-hidden="true" className="text-slate-400 dark:text-slate-600">
+                              ·
+                            </span>
+                            <span className="text-amber-600 dark:text-amber-400 font-mono tabular-nums inline-flex items-center gap-1">
+                              <Star className="w-3 h-3 fill-amber-500 text-amber-500 dark:fill-amber-400 dark:text-amber-400" />
+                              {review.rating}/5
+                            </span>
+                            <span aria-hidden="true" className="text-slate-400 dark:text-slate-600">
+                              ·
+                            </span>
+                            <span className="text-slate-500 dark:text-slate-400 font-mono">
+                              {formatTimestamp(review.updatedAt || review.createdAt)}
+                            </span>
+                          </div>
+                          <p className="text-sm text-slate-700 dark:text-slate-300 leading-relaxed break-words">
+                            {review.content}
+                          </p>
+                        </div>
                       </div>
 
                       {canDelete && (

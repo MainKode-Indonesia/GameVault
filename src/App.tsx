@@ -297,9 +297,18 @@ export default function App() {
     return () => unsubscribe();
   }, [authReady, isAdmin]);
 
-  // Auto-seed starter games once when verified admin opens an empty catalog or legacy schema
+  // Auto-seed starter games once when verified admin opens an empty catalog or legacy schema/dummy mirrors
   useEffect(() => {
     if (!authReady || gamesLoading || !isAdmin || !user) return;
+    const hasDummyMirror = (g: GameItem) =>
+      (g.downloadLinks ?? []).some(
+        (m) =>
+          m.url.includes('example.org') ||
+          m.url.includes('example.com') ||
+          m.url.includes('drive.google.com/drive/folders/chrono-eclipse-mirror') ||
+          m.url.includes('drive.google.com/drive/folders/valkyrie-protocol-zero') ||
+          m.url.includes('drive.google.com/drive/folders/apex-horizon-touge')
+      );
     const needsSeedOrUpgrade =
       games.length === 0 ||
       games.some(
@@ -309,7 +318,8 @@ export default function App() {
           g.ratingSum === undefined ||
           g.reviewCount === undefined ||
           !Array.isArray(g.tags) ||
-          g.tags.length === 0
+          g.tags.length === 0 ||
+          hasDummyMirror(g)
       );
     if (needsSeedOrUpgrade && !autoSeededRef.current) {
       autoSeededRef.current = true;

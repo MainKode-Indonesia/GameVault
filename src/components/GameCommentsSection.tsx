@@ -78,6 +78,45 @@ function resolveRoleBadge(
   return null;
 }
 
+function CommentUserAvatar({
+  photoUrl,
+  name,
+  sizeClass = 'w-8 h-8',
+}: {
+  photoUrl?: string;
+  name: string;
+  sizeClass?: string;
+}) {
+  const [imgFailed, setImgFailed] = useState(false);
+
+  useEffect(() => {
+    setImgFailed(false);
+  }, [photoUrl]);
+
+  const initial = (name || 'P').trim().slice(0, 1).toUpperCase() || 'P';
+
+  if (photoUrl && isSafeHttpOrAssetUrl(photoUrl) && !imgFailed) {
+    return (
+      <img
+        src={photoUrl}
+        alt={name}
+        referrerPolicy="no-referrer"
+        onError={() => setImgFailed(true)}
+        className={`${sizeClass} rounded-full object-cover border border-slate-300 dark:border-slate-700 bg-slate-100 dark:bg-[#0B0E14] shrink-0`}
+      />
+    );
+  }
+
+  return (
+    <div
+      aria-hidden="true"
+      className={`${sizeClass} rounded-full bg-slate-200 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200 text-xs font-semibold flex items-center justify-center shrink-0`}
+    >
+      {initial}
+    </div>
+  );
+}
+
 export function GameCommentsSection({
   gameId,
   gameTitle,
@@ -317,14 +356,21 @@ export function GameCommentsSection({
           onSubmit={handlePostComment}
           className="p-4 rounded-lg bg-slate-50 dark:bg-[#0B0E14] border border-slate-200 dark:border-slate-800 space-y-3"
         >
-          <div className="flex items-center justify-between text-xs text-slate-600 dark:text-slate-400">
-            <span>
-              Commenting as{' '}
-              <span className="text-slate-900 dark:text-slate-200 font-medium">
-                {user.displayName || user.email}
+          <div className="flex items-center justify-between gap-3 text-xs text-slate-600 dark:text-slate-400">
+            <div className="flex items-center gap-2 min-w-0">
+              <CommentUserAvatar
+                photoUrl={userAvatarUrl || user.photoURL || ''}
+                name={userDisplayName || user.displayName || user.email || 'Player'}
+                sizeClass="w-6 h-6"
+              />
+              <span className="truncate">
+                Commenting as{' '}
+                <span className="text-slate-900 dark:text-slate-200 font-medium">
+                  {userDisplayName || user.displayName || user.email}
+                </span>
               </span>
-            </span>
-            <span className="font-mono tabular-nums">
+            </div>
+            <span className="font-mono tabular-nums shrink-0">
               {commentText.trim().length}/{BLUEPRINT_LIMITS.COMMENT_MAX}
             </span>
           </div>
@@ -378,7 +424,10 @@ export function GameCommentsSection({
             const canDelete = Boolean(
               user && (user.uid === comment.userId || isAdmin)
             );
-            const initial = (comment.userName || 'P').slice(0, 1).toUpperCase();
+            const resolvedPhoto =
+              user && user.uid === comment.userId && userAvatarUrl
+                ? userAvatarUrl
+                : comment.userPhoto;
             const roleBadge = resolveRoleBadge(
               comment.userId,
               userBadges[comment.userId],
@@ -390,18 +439,13 @@ export function GameCommentsSection({
                 className="py-4 flex items-start justify-between gap-4"
               >
                 <div className="flex items-start gap-3 min-w-0">
-                  {comment.userPhoto && isSafeHttpOrAssetUrl(comment.userPhoto) ? (
-                    <img
-                      src={comment.userPhoto}
-                      alt={comment.userName}
-                      referrerPolicy="no-referrer"
-                      className="w-8 h-8 rounded-full object-cover border border-slate-300 dark:border-slate-700 shrink-0 mt-0.5"
+                  <div className="mt-0.5 shrink-0">
+                    <CommentUserAvatar
+                      photoUrl={resolvedPhoto}
+                      name={comment.userName}
+                      sizeClass="w-8 h-8"
                     />
-                  ) : (
-                    <div className="w-8 h-8 rounded-full bg-slate-200 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200 text-xs font-semibold flex items-center justify-center shrink-0 mt-0.5">
-                      {initial}
-                    </div>
-                  )}
+                  </div>
 
                   <div className="space-y-1 min-w-0">
                     <div className="flex flex-wrap items-center gap-2 text-xs">

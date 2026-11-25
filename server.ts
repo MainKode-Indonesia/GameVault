@@ -79,6 +79,10 @@ function isPrivateOrBlockedHostname(hostname: string): boolean {
 
 function detectMirrorProvider(hostname: string): string {
   const host = hostname.toLowerCase();
+  if (host.includes('github.com') || host.includes('githubusercontent.com')) return 'GitHub Releases';
+  if (host.includes('sourceforge.net')) return 'SourceForge';
+  if (host.includes('itch.io')) return 'Itch.io';
+  if (host.includes('flathub.org')) return 'Flathub';
   if (host.includes('drive.google.com') || host.includes('docs.google.com')) return 'Google Drive';
   if (host.includes('mediafire.com')) return 'MediaFire';
   if (host.includes('mega.nz') || host.includes('mega.co.nz')) return 'Mega.nz';
@@ -86,6 +90,15 @@ function detectMirrorProvider(hostname: string): string {
   if (host.includes('gofile.io')) return 'GoFile';
   if (host.includes('1fichier.com')) return '1Fichier';
   if (host.includes('dropbox.com')) return 'Dropbox';
+  if (host.startsWith('dl.')) return 'Official CDN';
+  if (
+    host.includes('unvanquished.net') ||
+    host.includes('supertuxkart.net') ||
+    host.includes('veloren.net') ||
+    host.includes('xonotic.org')
+  ) {
+    return 'Official Site';
+  }
   return 'Direct CDN';
 }
 
@@ -189,13 +202,21 @@ async function inspectMirrorUrls(urls: unknown[]) {
 
       const provider = detectMirrorProvider(parsed.hostname);
 
-      if (parsed.hostname.endsWith('.example.org') || parsed.hostname.endsWith('.example.com')) {
+      const hostLower = parsed.hostname.toLowerCase();
+      if (
+        hostLower === 'example.org' ||
+        hostLower.endsWith('.example.org') ||
+        hostLower === 'example.com' ||
+        hostLower.endsWith('.example.com') ||
+        hostLower === 'example.net' ||
+        hostLower.endsWith('.example.net')
+      ) {
         return {
           url: trimmed,
-          valid: true,
-          provider,
-          status: 'format-ok',
-          reason: 'URL structure and provider verified.',
+          valid: false,
+          provider: 'Placeholder',
+          status: 'invalid',
+          reason: 'Placeholder/dummy domains (example.*) are not allowed. Use a real mirror URL.',
         };
       }
 
